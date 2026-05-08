@@ -2,8 +2,8 @@
 //!
 //! Provides cycle detection for dependency graphs to enforce BR-006.
 
-use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::algo::is_cyclic_directed;
+use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::HashMap;
 use std::hash::Hash;
 use thiserror::Error;
@@ -86,8 +86,10 @@ impl DAGValidator {
 
         for node in graph.node_indices() {
             if !visited.contains(&node) {
-                if let Some(cycle) = Self::dfs_find_cycle(graph, node, &mut visited, &mut recursion_stack, &mut path) {
-                    return format!("{:?}", cycle);
+                if let Some(cycle) =
+                    Self::dfs_find_cycle(graph, node, &mut visited, &mut recursion_stack, &mut path)
+                {
+                    return format!("{cycle:?}");
                 }
             }
         }
@@ -112,7 +114,9 @@ impl DAGValidator {
 
         for neighbor in graph.neighbors(node) {
             if !visited.contains(&neighbor) {
-                if let Some(cycle) = Self::dfs_find_cycle(graph, neighbor, visited, recursion_stack, path) {
+                if let Some(cycle) =
+                    Self::dfs_find_cycle(graph, neighbor, visited, recursion_stack, path)
+                {
                     return Some(cycle);
                 }
             } else if recursion_stack.contains(&neighbor) {
@@ -120,7 +124,7 @@ impl DAGValidator {
                 let cycle_start = path.iter().position(|&n| n == neighbor).unwrap_or(0);
                 let cycle_nodes: Vec<String> = path[cycle_start..]
                     .iter()
-                    .map(|&idx| format!("{:?}", &graph[idx]))
+                    .map(|&idx| format!("{node:?}", node = &graph[idx]))
                     .collect();
                 return Some(cycle_nodes);
             }
