@@ -32,12 +32,14 @@ dependencies = [
  "adam-domain",
  "anyhow",
  "async-trait",
+ "chrono",
  "mockall",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
  "tokio-test",
+ "uuid",
 ]
 
 [[package]]
@@ -49,6 +51,7 @@ dependencies = [
  "petgraph",
  "serde",
  "thiserror",
+ "tokio",
  "tokio-test",
  "uuid",
 ]

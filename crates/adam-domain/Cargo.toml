@@ -13,4 +13,5 @@ async-trait = { workspace = true }
 petgraph = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
 tokio-test = { workspace = true }
