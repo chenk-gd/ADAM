@@ -1,0 +1,29 @@
+[package]
+name = "adam-server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "adam-server"
+path = "src/main.rs"
+
+[dependencies]
+adam-domain = { path = "../adam-domain" }
+adam-application = { path = "../adam-application" }
+adam-infrastructure = { path = "../adam-infrastructure" }
+adam-adapters = { path = "../adam-adapters" }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+config = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

@@ -1,0 +1,78 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/adam-domain",
+    "crates/adam-application",
+    "crates/adam-infrastructure",
+    "crates/adam-adapters",
+    "crates/adam-server",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# 异步运行时
+async-trait = "0.1"
+tokio = { version = "1.44", features = ["full"] }
+tokio-util = "0.7"
+
+# Web 框架
+axum = "0.8"
+tower = "0.5"
+tower-http = "0.6"
+
+# 序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# 数据库
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "migrate"] }
+
+# MCP
+rmcp = "0.3"
+
+# 验证
+validator = { version = "0.20", features = ["derive"] }
+
+# UUID
+uuid = { version = "1.16", features = ["v4", "serde"] }
+
+# 时间
+chrono = { version = "0.4", features = ["serde"] }
+
+# 图算法
+petgraph = "0.7"
+
+# 版本解析
+semver = "1.0"
+
+# 错误处理
+thiserror = "2.0"
+anyhow = "1.0"
+
+# 日志/追踪
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 配置
+config = "0.15"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# JSON Schema
+schemars = "0.8"
+jsonschema = "0.29"
+
+# HTTP 客户端
+reqwest = { version = "0.12", features = ["json"] }
+
+# 缓存（可选，非 MVP）
+redis = { version = "0.29", features = ["tokio-comp"] }
+
+# 测试
+mockall = "0.13"
+tokio-test = "0.4"

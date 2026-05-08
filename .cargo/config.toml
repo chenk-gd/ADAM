@@ -1,0 +1,5 @@
+[env]
+DATABASE_URL = "postgres://postgres:postgres@localhost/adam_test"
+
+[build]
+target-dir = "target"
