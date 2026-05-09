@@ -15,6 +15,11 @@ impl AssetId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    /// Create an AssetId from an existing UUID
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
 }
 
 impl Default for AssetId {
@@ -30,6 +35,11 @@ pub struct AssetTypeId(pub Uuid);
 impl AssetTypeId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// Create an AssetTypeId from an existing UUID
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
     }
 }
 
@@ -47,6 +57,11 @@ impl ProjectId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    /// Create a ProjectId from an existing UUID
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
 }
 
 impl Default for ProjectId {
@@ -62,6 +77,11 @@ pub struct OrganizationId(pub Uuid);
 impl OrganizationId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// Create an OrganizationId from an existing UUID
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
     }
 }
 

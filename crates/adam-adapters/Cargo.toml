@@ -24,3 +24,4 @@ tracing = { workspace = true }
 [dev-dependencies]
 tokio-test = { workspace = true }
 mockall = { workspace = true }
+async-trait = { workspace = true }
