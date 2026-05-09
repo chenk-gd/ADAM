@@ -2,6 +2,8 @@
 
 pub mod in_memory;
 
+use crate::asset::asset_type::AssetType;
+use crate::asset::instance::AssetTypeId;
 use crate::asset::instance::{AssetId, AssetInstance};
 use crate::asset::state::AssetState;
 use async_trait::async_trait;
@@ -108,4 +110,20 @@ pub trait DependencyRepository: Send + Sync {
         source_id: &AssetId,
         target_id: &AssetId,
     ) -> Result<(), RepositoryError>;
+}
+
+/// Repository trait for asset types
+#[async_trait]
+pub trait AssetTypeRepository: Send + Sync {
+    /// Create a new asset type
+    async fn create(&self, asset_type: &AssetType) -> Result<AssetType, RepositoryError>;
+
+    /// Find by ID
+    async fn find_by_id(&self, id: &AssetTypeId) -> Result<Option<AssetType>, RepositoryError>;
+
+    /// Find by name
+    async fn find_by_name(&self, name: &str) -> Result<Option<AssetType>, RepositoryError>;
+
+    /// List all asset types
+    async fn list_all(&self) -> Result<Vec<AssetType>, RepositoryError>;
 }

@@ -1,8 +1,11 @@
 //! In-memory repository implementations for testing
 
+use crate::asset::asset_type::AssetType;
+use crate::asset::instance::{AssetId, AssetInstance, AssetTypeId};
+use crate::asset::state::AssetState;
+use crate::repository::{AssetRepository, AssetTypeRepository, CreateAssetCommand, RepositoryError};
 use crate::{
-    AssetId, AssetInstance, AssetRepository, AssetState, CreateAssetCommand, DirtyQueueEntry,
-    DirtyQueueRepository, OrganizationId, ProjectId, RepositoryError, VirtualInstance,
+    DirtyQueueEntry, DirtyQueueRepository, OrganizationId, ProjectId, VirtualInstance,
     VirtualInstanceId, VirtualInstanceRepository,
 };
 use async_trait::async_trait;
@@ -298,5 +301,53 @@ impl VirtualInstanceRepository for InMemoryVirtualInstanceRepository {
             .filter(|v| v.project_id == *project_id)
             .cloned()
             .collect())
+    }
+}
+
+/// In-memory asset type repository for testing
+pub struct InMemoryAssetTypeRepository {
+    pub data: Mutex<HashMap<AssetTypeId, AssetType>>,
+}
+
+impl InMemoryAssetTypeRepository {
+    /// Create a new empty repository
+    pub fn new() -> Self {
+        Self {
+            data: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for InMemoryAssetTypeRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl AssetTypeRepository for InMemoryAssetTypeRepository {
+    async fn create(&self, asset_type: &AssetType) -> Result<AssetType, RepositoryError> {
+        let mut data = self.data.lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        data.insert(asset_type.id, asset_type.clone());
+        Ok(asset_type.clone())
+    }
+
+    async fn find_by_id(&self, id: &AssetTypeId) -> Result<Option<AssetType>, RepositoryError> {
+        let data = self.data.lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        Ok(data.get(id).cloned())
+    }
+
+    async fn find_by_name(&self, name: &str) -> Result<Option<AssetType>, RepositoryError> {
+        let data = self.data.lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        Ok(data.values().find(|at| at.name == name).cloned())
+    }
+
+    async fn list_all(&self) -> Result<Vec<AssetType>, RepositoryError> {
+        let data = self.data.lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        Ok(data.values().cloned().collect())
     }
 }

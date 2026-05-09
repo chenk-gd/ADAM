@@ -15,10 +15,10 @@ pub use dependency::boundary::{AssetLevel, DependencyBoundaryContext, Dependency
 pub use dependency::dag::{DAGError, DAGValidator};
 pub use dependency::{DependencyRule, DependencyRuleId, DependencyRuleRepository, RelationshipType};
 pub use repository::in_memory::{
-    InMemoryAssetRepository, InMemoryDirtyQueueRepository, InMemoryVirtualInstanceRepository,
+    InMemoryAssetRepository, InMemoryAssetTypeRepository, InMemoryDirtyQueueRepository, InMemoryVirtualInstanceRepository,
 };
 pub use repository::{
-    AssetRepository, CreateAssetCommand, DependencyRepository, DirtyQueueEntry,
+    AssetRepository, AssetTypeRepository, CreateAssetCommand, DependencyRepository, DirtyQueueEntry,
     DirtyQueueRepository, RepositoryError,
 };
 pub use virtual_instance::{VirtualInstance, VirtualInstanceId, VirtualInstanceRepository};
