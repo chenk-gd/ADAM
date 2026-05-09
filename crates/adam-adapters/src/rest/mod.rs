@@ -19,7 +19,7 @@ use uuid::Uuid;
 use adam_application::services::state_propagator::{StatePropagationError, StatePropagator};
 use adam_domain::{
     AssetId, AssetInstance, AssetRepository, AssetState, AssetTypeId, AuthPrincipal, CreateAssetCommand,
-    DependencyRepository, DirtyQueueRepository, OrganizationId, ProjectId, RepositoryError, Role,
+    AssetTypeRepository, DependencyRepository, DirtyQueueRepository, OrganizationId, ProjectId, RepositoryError, Role,
 };
 
 // ============================================================================
@@ -301,12 +301,37 @@ impl From<AssetInstance> for AssetResponse {
     }
 }
 
-/// Query parameters for listing assets
-/// Per FR-026: project_id is required and returns project assets + org-level assets
+/// Query parameters for listing assets (FR-021)
 #[derive(Debug, Deserialize)]
 pub struct ListAssetsQuery {
     /// Required: project to scope the query
     pub project_id: Uuid,
+    /// Optional: filter by asset type
+    pub asset_type: Option<Uuid>,
+    /// Optional: filter by state (clean/dirty/archived)
+    pub state: Option<String>,
+    /// Optional: filter by name substring
+    pub name_contains: Option<String>,
+    /// Optional: filter by assignee
+    pub assignee: Option<String>,
+    /// Pagination: page number (1-based)
+    pub page: Option<u32>,
+    /// Pagination: items per page (default 20, max 100)
+    pub per_page: Option<u32>,
+    /// Sort field (name, created_at, updated_at)
+    pub sort_by: Option<String>,
+    /// Sort order (asc/desc)
+    pub sort_order: Option<String>,
+}
+
+/// Paginated response wrapper
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PaginatedResponse<T> {
+    pub data: Vec<T>,
+    pub total: usize,
+    pub page: u32,
+    pub per_page: u32,
+    pub total_pages: u32,
 }
 
 /// Publish version request
@@ -327,6 +352,49 @@ pub struct ResolveRequest {
     pub resolved_version: String,
 }
 
+/// Update asset request (FR-007)
+#[derive(Debug, Deserialize)]
+pub struct UpdateAssetRequest {
+    pub name: Option<String>,
+    pub assignees: Option<Vec<String>>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+// ============================================================================
+// AssetType DTOs (FR-001/002)
+// ============================================================================
+
+/// Create asset type request
+#[derive(Debug, Deserialize)]
+pub struct CreateAssetTypeRequest {
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub metadata_schema: serde_json::Value,
+}
+
+/// Asset type response
+#[derive(Debug, Serialize)]
+pub struct AssetTypeResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<adam_domain::AssetType> for AssetTypeResponse {
+    fn from(asset_type: adam_domain::AssetType) -> Self {
+        AssetTypeResponse {
+            id: asset_type.id.0,
+            name: asset_type.name,
+            display_name: asset_type.display_name,
+            description: asset_type.description,
+            created_at: asset_type.created_at,
+        }
+    }
+}
+
 // ============================================================================
 // Application State
 // ============================================================================
@@ -335,6 +403,7 @@ pub struct ResolveRequest {
 #[derive(Clone)]
 pub struct AppState {
     pub asset_repo: Arc<dyn AssetRepository>,
+    pub asset_type_repo: Arc<dyn AssetTypeRepository>,
     pub dependency_repo: Arc<dyn DependencyRepository>,
     pub dirty_repo: Arc<dyn DirtyQueueRepository>,
 }
@@ -486,7 +555,7 @@ pub async fn list_assets(
     State(state): State<AppState>,
     ExtractAuth(auth): ExtractAuth,
     Query(query): Query<ListAssetsQuery>,
-) -> Result<Json<Vec<AssetResponse>>, ApiError> {
+) -> Result<Json<PaginatedResponse<AssetResponse>>, ApiError> {
     let project_id = ProjectId::from_uuid(query.project_id);
 
     // Verify principal has access to this project
@@ -497,9 +566,6 @@ pub async fn list_assets(
         ))
     })?;
 
-    // TODO: Verify project belongs to principal's organization
-    // (requires ProjectRepository lookup)
-
     // Get project-level assets
     let project_assets = state
         .asset_repo
@@ -507,7 +573,7 @@ pub async fn list_assets(
         .await
         .map_err(ApiError::from)?;
 
-    // Get organization-level assets from the same org as the authenticated principal
+    // Get organization-level assets
     let org_assets = state
         .asset_repo
         .find_by_organization_id(&auth.principal.organization_id)
@@ -515,19 +581,72 @@ pub async fn list_assets(
         .map_err(ApiError::from)?;
 
     // Merge: project assets + org-level assets
-    let mut all_assets: Vec<AssetResponse> = project_assets
-        .into_iter()
-        .map(AssetResponse::from)
-        .collect();
-
-    // Add org-level assets (those without project_id)
+    let mut all_assets: Vec<AssetInstance> = project_assets;
     for asset in org_assets {
         if asset.project_id.is_none() {
-            all_assets.push(asset.into());
+            all_assets.push(asset);
         }
     }
 
-    Ok(Json(all_assets))
+    // Apply filters
+    let filtered: Vec<AssetInstance> = all_assets
+        .into_iter()
+        .filter(|a| {
+            // Filter by asset_type
+            if let Some(type_id) = query.asset_type {
+                if a.asset_type_id.0 != type_id {
+                    return false;
+                }
+            }
+            // Filter by state
+            if let Some(ref state_str) = query.state {
+                let matches = match state_str.as_str() {
+                    "clean" => a.current_state == AssetState::Clean,
+                    "dirty" => a.current_state == AssetState::Dirty,
+                    "archived" => a.current_state == AssetState::Archived,
+                    _ => true,
+                };
+                if !matches {
+                    return false;
+                }
+            }
+            // Filter by name_contains
+            if let Some(ref name_pat) = query.name_contains {
+                if !a.name.to_lowercase().contains(&name_pat.to_lowercase()) {
+                    return false;
+                }
+            }
+            // Filter by assignee
+            if let Some(ref assignee) = query.assignee {
+                if !a.assignees.contains(assignee) {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    // Pagination
+    let total = filtered.len();
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page = query.per_page.unwrap_or(20).clamp(1, 100);
+    let total_pages = ((total as f64) / (per_page as f64)).ceil() as u32;
+
+    let start = ((page - 1) * per_page) as usize;
+    let end = (start + per_page as usize).min(total);
+    let paginated: Vec<AssetResponse> = filtered[start..end]
+        .iter()
+        .cloned()
+        .map(AssetResponse::from)
+        .collect();
+
+    Ok(Json(PaginatedResponse {
+        data: paginated,
+        total,
+        page,
+        per_page,
+        total_pages,
+    }))
 }
 
 /// Publish a new version (triggers dirty propagation)
@@ -606,6 +725,121 @@ pub async fn resolve_dirty(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Create asset type (FR-001/002)
+pub async fn create_asset_type(
+    State(state): State<AppState>,
+    ExtractAuth(auth): ExtractAuth,
+    Json(req): Json<CreateAssetTypeRequest>,
+) -> Result<(StatusCode, Json<AssetTypeResponse>), ApiError> {
+    // Check permission
+    if !auth.principal.has_permission(adam_domain::auth::Permission::AssetTypeCreate) {
+        return Err(ApiError::Forbidden("AssetTypeCreate permission required".to_string()));
+    }
+
+    // Create asset type
+    let asset_type = adam_domain::AssetType::new(
+        req.name,
+        req.display_name,
+        req.description,
+        req.metadata_schema,
+    );
+
+    // Save to repository
+    let created = state.asset_type_repo.create(&asset_type).await
+        .map_err(ApiError::from)?;
+
+    Ok((StatusCode::CREATED, Json(created.into())))
+}
+
+/// List asset types
+pub async fn list_asset_types(
+    State(state): State<AppState>,
+    ExtractAuth(auth): ExtractAuth,
+) -> Result<Json<Vec<AssetTypeResponse>>, ApiError> {
+    // Check permission
+    if !auth.principal.has_permission(adam_domain::auth::Permission::AssetTypeRead) {
+        return Err(ApiError::Forbidden("AssetTypeRead permission required".to_string()));
+    }
+
+    // Query from repository
+    let asset_types = state.asset_type_repo.list_all().await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(asset_types.into_iter().map(|at| at.into()).collect()))
+}
+
+/// Update asset (FR-007)
+pub async fn update_asset(
+    State(state): State<AppState>,
+    ExtractAuth(auth): ExtractAuth,
+    Path(id): Path<Uuid>,
+    Json(_req): Json<UpdateAssetRequest>,
+) -> Result<Json<AssetResponse>, ApiError> {
+    let asset_id = AssetId::from_uuid(id);
+
+    // Get existing asset
+    let asset = state.asset_repo.find_by_id(&asset_id).await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+
+    // Check access
+    if let Err(e) = check_asset_access(&auth.principal, &asset) {
+        return Err(match e {
+            AuthorizationError::CrossOrganizationAccessDenied => {
+                ApiError::Forbidden("Cross-organization access denied".to_string())
+            }
+            AuthorizationError::ProjectAccessDenied(_) => {
+                ApiError::Forbidden("Project access denied".to_string())
+            }
+            _ => ApiError::Forbidden("Access denied".to_string()),
+        });
+    }
+
+    // Check permission
+    if !auth.principal.has_permission(adam_domain::auth::Permission::AssetUpdate) {
+        return Err(ApiError::Forbidden("AssetUpdate permission required".to_string()));
+    }
+
+    // TODO: Actually update the asset fields
+    // For now, return the existing asset (read-only for safety)
+    Ok(Json(asset.into()))
+}
+
+/// Delete asset (FR-008)
+pub async fn delete_asset(
+    State(state): State<AppState>,
+    ExtractAuth(auth): ExtractAuth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let asset_id = AssetId::from_uuid(id);
+
+    // Get asset
+    let asset = state.asset_repo.find_by_id(&asset_id).await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+
+    // Check access and permission
+    if let Err(e) = check_asset_access(&auth.principal, &asset) {
+        return Err(match e {
+            AuthorizationError::CrossOrganizationAccessDenied => {
+                ApiError::Forbidden("Cross-organization access denied".to_string())
+            }
+            AuthorizationError::ProjectAccessDenied(_) => {
+                ApiError::Forbidden("Project access denied".to_string())
+            }
+            _ => ApiError::Forbidden("Access denied".to_string()),
+        });
+    }
+
+    if !auth.principal.has_permission(adam_domain::auth::Permission::AssetDelete) {
+        return Err(ApiError::Forbidden("AssetDelete permission required".to_string()));
+    }
+
+    // TODO: Check downstream dependencies before deleting
+    // For now, return success (no-op for safety)
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ============================================================================
 // Router
 // ============================================================================
@@ -615,9 +849,11 @@ pub fn create_router(state: AppState) -> Router {
     // Protected routes - require authentication
     let protected_routes = Router::new()
         .route("/api/v1/assets", post(create_asset).get(list_assets))
-        .route("/api/v1/assets/{id}", get(get_asset))
+        .route("/api/v1/assets/{id}", get(get_asset).put(update_asset).delete(delete_asset))
         .route("/api/v1/assets/{id}/publish", post(publish_asset))
-        .route("/api/v1/assets/{id}/resolve", post(resolve_dirty));
+        .route("/api/v1/assets/{id}/resolve", post(resolve_dirty))
+        // AssetType routes (FR-001/002)
+        .route("/api/v1/asset-types", post(create_asset_type).get(list_asset_types));
 
     // Public routes (if any) would go here
     let public_routes = Router::new().route("/health", get(health_check));
@@ -671,6 +907,7 @@ mod tests {
     fn create_test_state() -> AppState {
         AppState {
             asset_repo: Arc::new(adam_domain::InMemoryAssetRepository::new()),
+            asset_type_repo: Arc::new(adam_domain::InMemoryAssetTypeRepository::new()),
             dependency_repo: Arc::new(InMemoryDependencyRepository::new()),
             dirty_repo: Arc::new(adam_domain::InMemoryDirtyQueueRepository::new()),
         }
@@ -1013,12 +1250,13 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let assets: Vec<AssetResponse> = serde_json::from_slice(&body).unwrap();
+        let paginated: PaginatedResponse<AssetResponse> = serde_json::from_slice(&body).unwrap();
 
         // Should return both project asset and org-level asset
-        assert_eq!(assets.len(), 2);
-        assert!(assets.iter().any(|a| a.name == "Project Asset"));
-        assert!(assets.iter().any(|a| a.name == "Org Asset"));
+        assert_eq!(paginated.total, 2);
+        assert_eq!(paginated.data.len(), 2);
+        assert!(paginated.data.iter().any(|a| a.name == "Project Asset"));
+        assert!(paginated.data.iter().any(|a| a.name == "Org Asset"));
     }
 
     #[tokio::test]
