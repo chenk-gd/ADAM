@@ -321,8 +321,61 @@ pub struct AppState {
 }
 
 // ============================================================================
-// Handlers
+// Authorization
 // ============================================================================
+
+/// Authorization errors
+#[derive(Debug, thiserror::Error)]
+pub enum AuthorizationError {
+    #[error("Cross-organization access denied")]
+    CrossOrganizationAccessDenied,
+    #[error("Project access denied")]
+    ProjectAccessDenied(ProjectId),
+    #[error("Permission denied")]
+    PermissionDenied,
+}
+
+impl IntoResponse for AuthorizationError {
+    fn into_response(self) -> axum::response::Response {
+        let status = StatusCode::FORBIDDEN;
+        let body = Json(ErrorResponse {
+            error: self.to_string(),
+        });
+        (status, body).into_response()
+    }
+}
+
+/// Check if principal can access an asset
+fn check_asset_access(
+    principal: &AuthPrincipal,
+    asset: &AssetInstance,
+) -> Result<(), AuthorizationError> {
+    // Check organization boundary
+    if asset.organization_id != principal.organization_id {
+        return Err(AuthorizationError::CrossOrganizationAccessDenied);
+    }
+
+    // For project-level assets, check project membership
+    if let Some(asset_project_id) = asset.project_id {
+        // Project-level asset - check if principal is member
+        if !principal.project_memberships.contains(&asset_project_id) {
+            return Err(AuthorizationError::ProjectAccessDenied(asset_project_id));
+        }
+    }
+
+    Ok(())
+}
+
+/// Check if principal can access a project
+fn check_project_access(
+    principal: &AuthPrincipal,
+    project_id: ProjectId,
+) -> Result<(), AuthorizationError> {
+    if !principal.project_memberships.contains(&project_id) {
+        return Err(AuthorizationError::ProjectAccessDenied(project_id));
+    }
+    Ok(())
+}
 
 /// Create a new asset
 /// Organization context comes from AuthPrincipal, not request body
@@ -331,6 +384,20 @@ pub async fn create_asset(
     ExtractAuth(auth): ExtractAuth,
     Json(req): Json<CreateAssetRequest>,
 ) -> Result<(StatusCode, Json<AssetResponse>), ApiError> {
+    // For project-level assets, validate project membership
+    if let Some(project_id) = req.project_id {
+        let pid = ProjectId::from_uuid(project_id);
+        check_project_access(&auth.principal, pid).map_err(|_| {
+            ApiError::Forbidden(format!(
+                "User is not a member of project {} in organization {:?}",
+                project_id, auth.principal.organization_id
+            ))
+        })?;
+    }
+
+    // TODO: Validate that project belongs to principal's organization
+    // (requires ProjectRepository lookup)
+
     // Organization comes from authenticated principal, not request body
     let cmd = CreateAssetCommand {
         name: req.name,
@@ -341,7 +408,6 @@ pub async fn create_asset(
         idempotency_key: req.idempotency_key,
     };
 
-    // TODO: Validate project membership for project-level assets
     // TODO: Validate dependencies if provided
 
     let asset = state
@@ -356,7 +422,7 @@ pub async fn create_asset(
 /// Get asset by ID
 pub async fn get_asset(
     State(state): State<AppState>,
-    ExtractAuth(_auth): ExtractAuth,
+    ExtractAuth(auth): ExtractAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<AssetResponse>, ApiError> {
     let asset_id = AssetId::from_uuid(id);
@@ -367,8 +433,16 @@ pub async fn get_asset(
         .map_err(ApiError::from)?
         .ok_or(ApiError::NotFound)?;
 
-    // TODO: Verify asset is accessible by the authenticated principal
-    // (same organization, and project-level assets require project membership)
+    // Verify asset is accessible by the authenticated principal
+    check_asset_access(&auth.principal, &asset).map_err(|e| match e {
+        AuthorizationError::CrossOrganizationAccessDenied => {
+            ApiError::Forbidden("Cross-organization access denied".to_string())
+        }
+        AuthorizationError::ProjectAccessDenied(_) => {
+            ApiError::Forbidden("Project access denied".to_string())
+        }
+        _ => ApiError::Forbidden("Access denied".to_string()),
+    })?;
 
     Ok(Json(asset.into()))
 }
@@ -381,6 +455,17 @@ pub async fn list_assets(
     Query(query): Query<ListAssetsQuery>,
 ) -> Result<Json<Vec<AssetResponse>>, ApiError> {
     let project_id = ProjectId::from_uuid(query.project_id);
+
+    // Verify principal has access to this project
+    check_project_access(&auth.principal, project_id).map_err(|_| {
+        ApiError::Forbidden(format!(
+            "User is not a member of project {} in organization {:?}",
+            query.project_id, auth.principal.organization_id
+        ))
+    })?;
+
+    // TODO: Verify project belongs to principal's organization
+    // (requires ProjectRepository lookup)
 
     // Get project-level assets
     let project_assets = state
@@ -846,7 +931,8 @@ mod tests {
         state.asset_repo.create(&org_cmd).await.unwrap();
 
         let app = create_router(state);
-        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-123", &[]);
+        // User must be a member of the project to list its assets
+        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-123", &[project_id.0]);
 
         let response = app
             .oneshot(
@@ -989,5 +1075,149 @@ mod tests {
         let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(health["status"], "healthy");
         assert!(health["version"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn create_asset_non_member_returns_403() {
+        let state = create_test_state();
+        let app = create_router(state);
+
+        // User is member of project1 but not project2
+        let org_id = Uuid::new_v4();
+        let project1 = Uuid::new_v4();
+        let project2 = Uuid::new_v4();
+        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[project1]);
+
+        // Try to create asset in project2 (not a member)
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/assets")
+                    .header("content-type", "application/json")
+                    .header(&auth_header, &auth_value)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "Test Asset",
+                            "asset_type_id": Uuid::new_v4(),
+                            "level": "project",
+                            "project_id": project2, // Not a member
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_asset_cross_org_returns_403() {
+        let state = create_test_state();
+
+        // Create asset in org1
+        let org1_id = OrganizationId::new();
+        let asset = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Org1 Asset".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: None,
+                organization_id: org1_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Organization,
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        let app = create_router(state);
+
+        // User from org2 tries to access
+        let org2_id = Uuid::new_v4();
+        let (auth_header, auth_value) = test_auth_header(org2_id, "user-456", &[]);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/v1/assets/{}", asset.id.0))
+                    .header(&auth_header, &auth_value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_project_asset_non_member_returns_403() {
+        let state = create_test_state();
+
+        // Create project-level asset
+        let org_id = OrganizationId::new();
+        let project_id = ProjectId::new();
+        let asset = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Project Asset".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: Some(project_id),
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Project,
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        let app = create_router(state);
+
+        // User is member of different project
+        let other_project = Uuid::new_v4();
+        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-456", &[other_project]);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/v1/assets/{}", asset.id.0))
+                    .header(&auth_header, &auth_value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn list_assets_non_member_returns_403() {
+        let state = create_test_state();
+        let app = create_router(state);
+
+        // User is member of project1 but not project2
+        let org_id = Uuid::new_v4();
+        let project1 = Uuid::new_v4();
+        let project2 = Uuid::new_v4();
+        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[project1]);
+
+        // Try to list assets for project2 (not a member)
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/v1/assets?project_id={}", project2))
+                    .header(&auth_header, &auth_value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
