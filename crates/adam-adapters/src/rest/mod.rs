@@ -18,23 +18,13 @@ use uuid::Uuid;
 
 use adam_application::services::state_propagator::{StatePropagationError, StatePropagator};
 use adam_domain::{
-    AssetId, AssetInstance, AssetRepository, AssetState, AssetTypeId, CreateAssetCommand,
+    AssetId, AssetInstance, AssetRepository, AssetState, AssetTypeId, AuthPrincipal, CreateAssetCommand,
     DependencyRepository, DirtyQueueRepository, OrganizationId, ProjectId, RepositoryError, Role,
 };
 
 // ============================================================================
 // Authentication Types
 // ============================================================================
-
-/// Authentication principal extracted from JWT/token
-/// Mirrors architecture.md AuthPrincipal definition
-#[derive(Debug, Clone)]
-pub struct AuthPrincipal {
-    pub id: String,
-    pub organization_id: OrganizationId,
-    pub project_memberships: Vec<ProjectId>,
-    pub roles: Vec<Role>,
-}
 
 /// Authentication context passed to handlers
 #[derive(Debug, Clone)]
