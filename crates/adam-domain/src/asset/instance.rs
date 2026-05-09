@@ -245,7 +245,14 @@ mod tests {
     fn test_is_archived() {
         let org_id = OrganizationId::new();
         let type_id = AssetTypeId::new();
-        let mut asset = AssetInstance::new_organization_level("Test", type_id, org_id);
+        let mut asset = AssetInstance::new_organization_level(
+            "Test",
+            type_id,
+            org_id,
+            "https://example.com/asset",
+            "manual",
+            serde_json::json!({}),
+        );
 
         assert!(!asset.is_archived());
         asset.current_state = AssetState::Archived;

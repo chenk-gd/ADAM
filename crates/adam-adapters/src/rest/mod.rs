@@ -799,6 +799,8 @@ mod tests {
                             "asset_type_id": Uuid::new_v4(),
                             "level": "project",
                             "project_id": project_id,
+                            "external_ref": "https://example.com/asset",
+                            "source": "manual",
                         })
                         .to_string(),
                     ))
@@ -1165,6 +1167,8 @@ mod tests {
                             "asset_type_id": Uuid::new_v4(),
                             "level": "project",
                             "project_id": project2, // Not a member
+                            "external_ref": "https://example.com/asset",
+                            "source": "manual",
                         })
                         .to_string(),
                     ))

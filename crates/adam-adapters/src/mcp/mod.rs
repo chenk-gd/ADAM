@@ -1599,6 +1599,9 @@ mod tests {
                 project_id: Some(project_id),
                 organization_id: org_id,
                 level: adam_domain::dependency::boundary::AssetLevel::Project,
+                external_ref: "https://example.com/asset".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
                 idempotency_key: None,
             })
             .await
@@ -1612,6 +1615,9 @@ mod tests {
                 project_id: Some(project_id),
                 organization_id: org_id,
                 level: adam_domain::dependency::boundary::AssetLevel::Project,
+                external_ref: "https://example.com/asset".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
                 idempotency_key: None,
             })
             .await
@@ -1673,6 +1679,9 @@ mod tests {
                 project_id: Some(project_id),
                 organization_id: org_id,
                 level: adam_domain::dependency::boundary::AssetLevel::Project,
+                external_ref: "https://example.com/asset".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
                 idempotency_key: None,
             })
             .await
@@ -1774,6 +1783,9 @@ mod tests {
                 project_id: Some(project_a),
                 organization_id: org_id,
                 level: adam_domain::dependency::boundary::AssetLevel::Project,
+                external_ref: "https://example.com/asset".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
                 idempotency_key: None,
             })
             .await
@@ -1812,6 +1824,9 @@ mod tests {
                 project_id: Some(project_id),
                 organization_id: org_id,
                 level: adam_domain::dependency::boundary::AssetLevel::Project,
+                external_ref: "https://example.com/asset".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
                 idempotency_key: None,
             })
             .await

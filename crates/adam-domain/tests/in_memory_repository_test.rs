@@ -50,6 +50,9 @@ async fn memory_repo_enforces_idempotency() {
         project_id: None,
         organization_id: org_id,
         level: adam_domain::AssetLevel::Organization,
+        external_ref: "https://example.com/asset/1".to_string(),
+        source: "manual".to_string(),
+        metadata: serde_json::json!({}),
         idempotency_key: Some("git:org1:proj1:abc123".to_string()),
     };
 
