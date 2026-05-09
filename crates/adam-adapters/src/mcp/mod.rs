@@ -819,6 +819,8 @@ impl AdanMcpServer {
         &self,
         request: PublishAssetRequest,
     ) -> Result<CallToolResult, rmcp::Error> {
+        use adam_application::services::state_propagator::StatePropagator;
+
         // Parse asset ID
         let asset_id = match parse_uuid(&request.asset_id) {
             Some(id) => AssetId::from_uuid(id),
@@ -853,20 +855,24 @@ impl AdanMcpServer {
         }
 
         // Generate version if not provided
-        let version = match request.version {
-            Some(v) => v,
-            None => {
-                // Simple version suggestion: 1.0.0 for first version
-                // In production, this would be more sophisticated
-                "1.0.0".to_string()
+        let version = request.version.unwrap_or_else(|| "1.0.0".to_string());
+
+        // Create and execute state propagator for dirty propagation
+        let propagator = StatePropagator::new();
+        let affected = match propagator.on_asset_published(
+            &asset_id,
+            &version,
+            self.state.asset_repo.as_ref(),
+            self.state.dependency_repo.as_ref(),
+            self.state.dirty_repo.as_ref(),
+        ).await {
+            Ok(affected) => affected,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Publish failed: {e}"
+                ))]));
             }
         };
-
-        // TODO: In full implementation, this would:
-        // 1. Create AssetVersion record
-        // 2. Snapshot dependencies
-        // 3. Update asset effective version
-        // 4. Trigger downstream dirty propagation
 
         let response = PublishAssetResponse {
             asset_id: asset.id.0.to_string(),
@@ -877,8 +883,14 @@ impl AdanMcpServer {
             },
         };
 
+        // Add affected assets info
+        let affected_ids: Vec<String> = affected.iter().map(|id| id.0.to_string()).collect();
+
         match serde_json::to_string(&response) {
-            Ok(json) => Ok(CallToolResult::success(vec![Content::text(json)])),
+            Ok(json) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "{json}\n\nAffected downstream assets: {}",
+                affected_ids.join(", ")
+            ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Serialization error: {e}"
             ))])),
