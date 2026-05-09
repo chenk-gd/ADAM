@@ -14,6 +14,12 @@ impl AssetVersionId {
     }
 }
 
+impl Default for AssetVersionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Semantic version type
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SemVer {
@@ -27,10 +33,6 @@ impl SemVer {
         Self { major, minor, patch }
     }
 
-    pub fn to_string(&self) -> String {
-        format!("v{}.{}.{}", self.major, self.minor, self.patch)
-    }
-
     pub fn parse(version: &str) -> Result<Self, String> {
         let version = version.trim_start_matches('v');
         let parts: Vec<&str> = version.split('.').collect();
@@ -42,6 +44,12 @@ impl SemVer {
             minor: parts[1].parse::<u64>().map_err(|e| e.to_string())?,
             patch: parts[2].parse::<u64>().map_err(|e| e.to_string())?,
         })
+    }
+}
+
+impl std::fmt::Display for SemVer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "v{}.{}.{}", self.major, self.minor, self.patch)
     }
 }
 

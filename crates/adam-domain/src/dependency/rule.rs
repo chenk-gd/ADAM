@@ -14,6 +14,12 @@ impl DependencyRuleId {
     }
 }
 
+impl Default for DependencyRuleId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Relationship type between asset types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RelationshipType {

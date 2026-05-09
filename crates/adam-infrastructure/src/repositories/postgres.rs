@@ -244,13 +244,13 @@ impl PostgresAssetRepository {
             level: match level_str.as_str() {
                 "project" => AssetLevel::Project,
                 "organization" => AssetLevel::Organization,
-                _ => return Err(RepositoryError::DatabaseError(format!("Invalid level: {}", level_str))),
+                _ => return Err(RepositoryError::DatabaseError(format!("Invalid level: {level_str}"))),
             },
             current_state: match state_str.as_str() {
                 "clean" => AssetState::Clean,
                 "dirty" => AssetState::Dirty,
                 "archived" => AssetState::Archived,
-                _ => return Err(RepositoryError::DatabaseError(format!("Invalid state: {}", state_str))),
+                _ => return Err(RepositoryError::DatabaseError(format!("Invalid state: {state_str}"))),
             },
             external_ref,
             source,

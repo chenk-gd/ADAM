@@ -13,6 +13,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize repositories
     let asset_repo = Arc::new(adam_domain::InMemoryAssetRepository::new());
+    let asset_type_repo = Arc::new(adam_domain::InMemoryAssetTypeRepository::new());
     let dependency_repo = Arc::new(adam_infrastructure::repositories::InMemoryDependencyRepository::new());
     let dirty_repo = Arc::new(adam_domain::InMemoryDirtyQueueRepository::new());
     let virtual_repo = Arc::new(adam_domain::InMemoryVirtualInstanceRepository::new());
@@ -44,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
     // Build REST router with AppState
     let app_state = AppState {
         asset_repo: asset_repo.clone(),
+        asset_type_repo: asset_type_repo.clone(),
         dependency_repo: dependency_repo.clone(),
         dirty_repo: dirty_repo.clone(),
     };
