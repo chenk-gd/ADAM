@@ -2,7 +2,8 @@
 
 use crate::{
     AssetId, AssetInstance, AssetRepository, AssetState, CreateAssetCommand, DirtyQueueEntry,
-    DirtyQueueRepository, OrganizationId, ProjectId, RepositoryError,
+    DirtyQueueRepository, OrganizationId, ProjectId, RepositoryError, VirtualInstance,
+    VirtualInstanceId, VirtualInstanceRepository,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -63,6 +64,12 @@ impl AssetRepository for InMemoryAssetRepository {
             organization_id: cmd.organization_id,
             level: cmd.level,
             current_state: AssetState::Clean,
+            external_ref: cmd.external_ref.clone(),
+            source: cmd.source.clone(),
+            metadata: cmd.metadata.clone(),
+            assignees: vec![],
+            publisher: None,
+            current_version: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             idempotency_key: cmd.idempotency_key.clone(),
@@ -213,6 +220,82 @@ impl DirtyQueueRepository for InMemoryDirtyQueueRepository {
         Ok(data
             .iter()
             .filter(|e| e.resolved_at.is_none())
+            .cloned()
+            .collect())
+    }
+}
+
+/// In-memory virtual instance repository for testing
+pub struct InMemoryVirtualInstanceRepository {
+    data: Mutex<HashMap<VirtualInstanceId, VirtualInstance>>,
+}
+
+impl InMemoryVirtualInstanceRepository {
+    /// Create a new empty repository
+    pub fn new() -> Self {
+        Self {
+            data: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for InMemoryVirtualInstanceRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl VirtualInstanceRepository for InMemoryVirtualInstanceRepository {
+    async fn find_by_id(
+        &self,
+        id: &VirtualInstanceId,
+    ) -> Result<Option<VirtualInstance>, RepositoryError> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        Ok(data.get(id).cloned())
+    }
+
+    async fn create(&self, instance: &VirtualInstance) -> Result<VirtualInstance, RepositoryError> {
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        data.insert(instance.id, instance.clone());
+        Ok(instance.clone())
+    }
+
+    async fn delete_expired(&self) -> Result<u64, RepositoryError> {
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        let now = Utc::now();
+        let expired_keys: Vec<VirtualInstanceId> = data
+            .iter()
+            .filter(|(_, v)| v.expires_at < now)
+            .map(|(k, _)| *k)
+            .collect();
+        let count = expired_keys.len();
+        for key in expired_keys {
+            data.remove(&key);
+        }
+        Ok(count as u64)
+    }
+
+    async fn find_by_project(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<Vec<VirtualInstance>, RepositoryError> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        Ok(data
+            .values()
+            .filter(|v| v.project_id == *project_id)
             .cloned()
             .collect())
     }

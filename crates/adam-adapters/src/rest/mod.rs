@@ -19,7 +19,7 @@ use uuid::Uuid;
 use adam_application::services::state_propagator::{StatePropagationError, StatePropagator};
 use adam_domain::{
     AssetId, AssetInstance, AssetRepository, AssetState, AssetTypeId, CreateAssetCommand,
-    DependencyRepository, DirtyQueueRepository, OrganizationId, ProjectId, RepositoryError,
+    DependencyRepository, DirtyQueueRepository, OrganizationId, ProjectId, RepositoryError, Role,
 };
 
 // ============================================================================
@@ -33,6 +33,7 @@ pub struct AuthPrincipal {
     pub id: String,
     pub organization_id: OrganizationId,
     pub project_memberships: Vec<ProjectId>,
+    pub roles: Vec<Role>,
 }
 
 /// Authentication context passed to handlers
@@ -63,7 +64,8 @@ impl IntoResponse for AuthError {
 }
 
 /// Extract AuthPrincipal from Authorization header
-/// For MVP: parses "Bearer {org_id}:{user_id}" format
+/// For MVP: parses "Bearer {org_id}:{user_id}:{role1,role2}:{project1,project2}" format
+/// Roles: SystemAdmin, OrgAdmin, ProjectAdmin, Developer, Reader, AiAgent
 pub fn extract_auth_principal(headers: &HeaderMap) -> Result<AuthPrincipal, AuthError> {
     let auth_header = headers
         .get("authorization")
@@ -76,7 +78,8 @@ pub fn extract_auth_principal(headers: &HeaderMap) -> Result<AuthPrincipal, Auth
 
     let token = auth_header[7..].trim();
 
-    // Simple token format for MVP: "org_id:user_id:project1,project2"
+    // Token format for MVP: "org_id:user_id:role1,role2:project1,project2"
+    // Example: "org-123:user-456:Developer,Reader:proj-1,proj-2"
     // In production, this would validate a JWT
     let parts: Vec<&str> = token.split(':').collect();
     if parts.len() < 2 {
@@ -86,8 +89,27 @@ pub fn extract_auth_principal(headers: &HeaderMap) -> Result<AuthPrincipal, Auth
     let org_id = Uuid::parse_str(parts[0]).map_err(|_| AuthError::InvalidToken)?;
     let user_id = parts[1].to_string();
 
-    let project_memberships = if parts.len() >= 3 {
+    // Parse roles (optional, defaults to empty)
+    let roles = if parts.len() >= 3 && !parts[2].is_empty() {
         parts[2]
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| match s {
+                "SystemAdmin" => Role::SystemAdmin,
+                "OrgAdmin" => Role::OrgAdmin,
+                "ProjectAdmin" => Role::ProjectAdmin,
+                "Developer" => Role::Developer,
+                "Reader" => Role::Reader,
+                "AiAgent" => Role::AiAgent,
+                _ => Role::Developer, // Default fallback
+            })
+            .collect()
+    } else {
+        vec![Role::Developer] // Default role
+    };
+
+    let project_memberships = if parts.len() >= 4 {
+        parts[3]
             .split(',')
             .filter(|s| !s.is_empty())
             .filter_map(|s| Uuid::parse_str(s).ok())
@@ -101,6 +123,7 @@ pub fn extract_auth_principal(headers: &HeaderMap) -> Result<AuthPrincipal, Auth
         id: user_id,
         organization_id: OrganizationId::from_uuid(org_id),
         project_memberships,
+        roles,
     })
 }
 
@@ -204,6 +227,12 @@ pub struct CreateAssetRequest {
     pub project_id: Option<Uuid>,
     pub level: AssetLevelDto,
     pub idempotency_key: Option<String>,
+    /// External system reference URL
+    pub external_ref: String,
+    /// Source system (git/wiki/jira/manual)
+    pub source: String,
+    /// Metadata JSON according to asset type schema
+    pub metadata: Option<serde_json::Value>,
     /// Optional: declare dependencies at creation time
     pub dependencies: Option<Vec<Uuid>>,
 }
@@ -356,9 +385,14 @@ fn check_asset_access(
     }
 
     // For project-level assets, check project membership
+    // OrgAdmin and SystemAdmin can bypass project membership checks within their org
     if let Some(asset_project_id) = asset.project_id {
-        // Project-level asset - check if principal is member
-        if !principal.project_memberships.contains(&asset_project_id) {
+        let is_org_admin = principal
+            .roles
+            .iter()
+            .any(|r| matches!(r, Role::OrgAdmin | Role::SystemAdmin));
+
+        if !is_org_admin && !principal.project_memberships.contains(&asset_project_id) {
             return Err(AuthorizationError::ProjectAccessDenied(asset_project_id));
         }
     }
@@ -371,7 +405,13 @@ fn check_project_access(
     principal: &AuthPrincipal,
     project_id: ProjectId,
 ) -> Result<(), AuthorizationError> {
-    if !principal.project_memberships.contains(&project_id) {
+    // OrgAdmin and SystemAdmin can bypass project membership checks within their org
+    let is_org_admin = principal
+        .roles
+        .iter()
+        .any(|r| matches!(r, Role::OrgAdmin | Role::SystemAdmin));
+
+    if !is_org_admin && !principal.project_memberships.contains(&project_id) {
         return Err(AuthorizationError::ProjectAccessDenied(project_id));
     }
     Ok(())
@@ -405,6 +445,9 @@ pub async fn create_asset(
         project_id: req.project_id.map(ProjectId::from_uuid),
         organization_id: auth.principal.organization_id,
         level: req.level.into(),
+        external_ref: req.external_ref,
+        source: req.source,
+        metadata: req.metadata.unwrap_or_else(|| serde_json::json!({})),
         idempotency_key: req.idempotency_key,
     };
 
@@ -644,14 +687,32 @@ mod tests {
     }
 
     /// Generate a test authorization header
-    fn test_auth_header(org_id: Uuid, user_id: &str, project_ids: &[Uuid]) -> (String, String) {
+    /// Token format: "org_id:user_id:role1,role2:project1,project2"
+    fn test_auth_header(
+        org_id: Uuid,
+        user_id: &str,
+        roles: &[Role],
+        project_ids: &[Uuid],
+    ) -> (String, String) {
+        let roles_str = roles
+            .iter()
+            .map(|r| match r {
+                Role::SystemAdmin => "SystemAdmin",
+                Role::OrgAdmin => "OrgAdmin",
+                Role::ProjectAdmin => "ProjectAdmin",
+                Role::Developer => "Developer",
+                Role::Reader => "Reader",
+                Role::AiAgent => "AiAgent",
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         let projects = project_ids
             .iter()
             .map(|u| u.to_string())
             .collect::<Vec<_>>()
             .join(",");
-        let token = format!("{}:{}:{}", org_id, user_id, projects);
-        ("authorization".to_string(), format!("Bearer {}", token))
+        let token = format!("{org_id}:{user_id}:{roles_str}:{projects}");
+        ("authorization".to_string(), format!("Bearer {token}"))
     }
 
     use async_trait::async_trait;
@@ -733,7 +794,7 @@ mod tests {
 
         let org_id = Uuid::new_v4();
         let project_id = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[project_id]);
+        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[Role::Developer], &[project_id]);
 
         let response = app
             .oneshot(
@@ -773,7 +834,7 @@ mod tests {
         let app = create_router(state);
 
         let org_id = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[]);
+        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[Role::Developer], &[]);
 
         let response = app
             .oneshot(
@@ -826,12 +887,15 @@ mod tests {
             project_id: None,
             organization_id: org_id,
             level: adam_domain::dependency::boundary::AssetLevel::Organization,
+            external_ref: "https://example.com/asset/1".to_string(),
+            source: "manual".to_string(),
+            metadata: serde_json::json!({}),
             idempotency_key: None,
         };
         let asset = state.asset_repo.create(&cmd).await.unwrap();
 
         let app = create_router(state);
-        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-123", &[]);
+        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-123", &[Role::Developer], &[]);
 
         let response = app
             .oneshot(
@@ -860,7 +924,7 @@ mod tests {
         let app = create_router(state);
 
         let org_id = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[]);
+        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[Role::Developer], &[]);
 
         let response = app
             .oneshot(
@@ -883,7 +947,7 @@ mod tests {
         let app = create_router(state);
 
         let org_id = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[]);
+        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[Role::Developer], &[]);
 
         // Without project_id query param, should fail (400 - missing required param)
         let response = app
@@ -915,6 +979,9 @@ mod tests {
             project_id: Some(project_id),
             organization_id: org_id,
             level: adam_domain::dependency::boundary::AssetLevel::Project,
+            external_ref: "https://example.com/project/asset".to_string(),
+            source: "manual".to_string(),
+            metadata: serde_json::json!({}),
             idempotency_key: None,
         };
         state.asset_repo.create(&project_cmd).await.unwrap();
@@ -926,13 +993,16 @@ mod tests {
             project_id: None,
             organization_id: org_id,
             level: adam_domain::dependency::boundary::AssetLevel::Organization,
+            external_ref: "https://example.com/org/asset".to_string(),
+            source: "manual".to_string(),
+            metadata: serde_json::json!({}),
             idempotency_key: None,
         };
         state.asset_repo.create(&org_cmd).await.unwrap();
 
         let app = create_router(state);
         // User must be a member of the project to list its assets
-        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-123", &[project_id.0]);
+        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-123", &[Role::Developer], &[project_id.0]);
 
         let response = app
             .oneshot(
@@ -992,6 +1062,9 @@ mod tests {
                 project_id: None,
                 organization_id: org_id,
                 level: adam_domain::dependency::boundary::AssetLevel::Organization,
+                external_ref: "https://example.com/asset".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
                 idempotency_key: None,
             })
             .await
@@ -1016,7 +1089,7 @@ mod tests {
             .unwrap();
 
         let app = create_router(state.clone());
-        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-123", &[]);
+        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-123", &[Role::Developer], &[]);
 
         let response = app
             .oneshot(
@@ -1086,7 +1159,7 @@ mod tests {
         let org_id = Uuid::new_v4();
         let project1 = Uuid::new_v4();
         let project2 = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[project1]);
+        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[Role::Developer], &[project1]);
 
         // Try to create asset in project2 (not a member)
         let response = app
@@ -1127,6 +1200,9 @@ mod tests {
                 project_id: None,
                 organization_id: org1_id,
                 level: adam_domain::dependency::boundary::AssetLevel::Organization,
+                external_ref: "https://example.com/asset".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
                 idempotency_key: None,
             })
             .await
@@ -1136,7 +1212,7 @@ mod tests {
 
         // User from org2 tries to access
         let org2_id = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org2_id, "user-456", &[]);
+        let (auth_header, auth_value) = test_auth_header(org2_id, "user-456", &[Role::Developer], &[]);
 
         let response = app
             .oneshot(
@@ -1168,6 +1244,9 @@ mod tests {
                 project_id: Some(project_id),
                 organization_id: org_id,
                 level: adam_domain::dependency::boundary::AssetLevel::Project,
+                external_ref: "https://example.com/asset".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
                 idempotency_key: None,
             })
             .await
@@ -1177,7 +1256,7 @@ mod tests {
 
         // User is member of different project
         let other_project = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-456", &[other_project]);
+        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-456", &[Role::Developer], &[other_project]);
 
         let response = app
             .oneshot(
@@ -1203,14 +1282,14 @@ mod tests {
         let org_id = Uuid::new_v4();
         let project1 = Uuid::new_v4();
         let project2 = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[project1]);
+        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[Role::Developer], &[project1]);
 
         // Try to list assets for project2 (not a member)
         let response = app
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri(format!("/api/v1/assets?project_id={}", project2))
+                    .uri(format!("/api/v1/assets?project_id={project2}"))
                     .header(&auth_header, &auth_value)
                     .body(Body::empty())
                     .unwrap(),
@@ -1218,6 +1297,105 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn org_admin_can_access_any_project_in_org() {
+        let state = create_test_state();
+        let app = create_router(state);
+
+        // User is NOT member of any project but has OrgAdmin role
+        let org_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let (auth_header, auth_value) = test_auth_header(org_id, "org-admin", &[Role::OrgAdmin], &[]);
+
+        // Try to list assets for project (not a member, but OrgAdmin)
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/v1/assets?project_id={project_id}"))
+                    .header(&auth_header, &auth_value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // OrgAdmin can access any project in their org - returns 200 even if empty
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn system_admin_can_access_any_project_in_org() {
+        let state = create_test_state();
+        let app = create_router(state);
+
+        // User is NOT member of any project but has SystemAdmin role
+        let org_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let (auth_header, auth_value) = test_auth_header(org_id, "sys-admin", &[Role::SystemAdmin], &[]);
+
+        // Try to list assets for project (not a member, but SystemAdmin)
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/v1/assets?project_id={project_id}"))
+                    .header(&auth_header, &auth_value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // SystemAdmin can access any project in their org - returns 200 even if empty
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn org_admin_cannot_access_cross_org() {
+        let state = create_test_state();
+
+        // Create asset in org1
+        let org1_id = OrganizationId::new();
+        let project1_id = ProjectId::new();
+        let asset = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Org1 Asset".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: Some(project1_id),
+                organization_id: org1_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Project,
+                external_ref: "https://example.com/asset".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        let app = create_router(state);
+
+        // OrgAdmin from org2 (different org) tries to access
+        let org2_id = Uuid::new_v4();
+        let (auth_header, auth_value) = test_auth_header(org2_id, "org-admin", &[Role::OrgAdmin], &[]);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/v1/assets/{}?project_id={}", asset.id.0, project1_id.0))
+                    .header(&auth_header, &auth_value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Cross-org access denied even for OrgAdmin
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }

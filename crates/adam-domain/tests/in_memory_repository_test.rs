@@ -22,6 +22,9 @@ async fn memory_repo_creates_asset() {
         project_id: Some(project_id),
         organization_id: org_id,
         level: adam_domain::AssetLevel::Project,
+        external_ref: "https://example.com/asset/1".to_string(),
+        source: "manual".to_string(),
+        metadata: serde_json::json!({}),
         idempotency_key: None,
     };
 
@@ -77,6 +80,9 @@ async fn memory_repo_update_state() {
         project_id: Some(project_id),
         organization_id: org_id,
         level: adam_domain::AssetLevel::Project,
+        external_ref: "https://example.com/asset/1".to_string(),
+        source: "manual".to_string(),
+        metadata: serde_json::json!({}),
         idempotency_key: None,
     };
 

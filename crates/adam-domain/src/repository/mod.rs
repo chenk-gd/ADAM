@@ -32,6 +32,9 @@ pub struct CreateAssetCommand {
     pub project_id: Option<crate::asset::instance::ProjectId>,
     pub organization_id: crate::asset::instance::OrganizationId,
     pub level: crate::dependency::boundary::AssetLevel,
+    pub external_ref: String,
+    pub source: String,
+    pub metadata: serde_json::Value,
     pub idempotency_key: Option<String>,
 }
 

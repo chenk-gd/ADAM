@@ -9,10 +9,12 @@ dependencies = [
  "adam-application",
  "adam-domain",
  "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "mockall",
  "rmcp",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror",
@@ -50,6 +52,7 @@ dependencies = [
  "chrono",
  "petgraph",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tokio-test",
@@ -61,6 +64,7 @@ name = "adam-infrastructure"
 version = "0.1.0"
 dependencies = [
  "adam-domain",
+ "async-trait",
  "chrono",
  "redis",
  "serde",
@@ -84,6 +88,7 @@ dependencies = [
  "axum",
  "clap",
  "config",
+ "rmcp",
  "serde",
  "serde_json",
  "tokio",
@@ -92,6 +97,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -2639,9 +2645,11 @@ dependencies = [
  "bitflags",
  "bytes",
  "http",
+ "http-body",
  "pin-project-lite",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]

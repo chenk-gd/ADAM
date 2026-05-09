@@ -101,6 +101,15 @@ pub struct AssetInstance {
     pub organization_id: OrganizationId,
     pub level: AssetLevel,
     pub current_state: AssetState,
+
+    // 新增字段 (根据 spec 5.2.3)
+    pub external_ref: String,           // 外部系统引用地址
+    pub source: String,                 // 来源：git/wiki/jira/manual
+    pub metadata: serde_json::Value,    // 按类型 schema 的元数据
+    pub assignees: Vec<String>,         // 责任人列表
+    pub publisher: Option<String>,      // 最新版本发布人
+    pub current_version: Option<String>, // 当前发布的版本号
+
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub idempotency_key: Option<String>,
@@ -113,6 +122,9 @@ impl AssetInstance {
         asset_type_id: AssetTypeId,
         project_id: ProjectId,
         organization_id: OrganizationId,
+        external_ref: impl Into<String>,
+        source: impl Into<String>,
+        metadata: serde_json::Value,
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -123,6 +135,12 @@ impl AssetInstance {
             organization_id,
             level: AssetLevel::Project,
             current_state: AssetState::Clean,
+            external_ref: external_ref.into(),
+            source: source.into(),
+            metadata,
+            assignees: vec![],
+            publisher: None,
+            current_version: None,
             created_at: now,
             updated_at: now,
             idempotency_key: None,
@@ -134,6 +152,9 @@ impl AssetInstance {
         name: impl Into<String>,
         asset_type_id: AssetTypeId,
         organization_id: OrganizationId,
+        external_ref: impl Into<String>,
+        source: impl Into<String>,
+        metadata: serde_json::Value,
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -144,6 +165,12 @@ impl AssetInstance {
             organization_id,
             level: AssetLevel::Organization,
             current_state: AssetState::Clean,
+            external_ref: external_ref.into(),
+            source: source.into(),
+            metadata,
+            assignees: vec![],
+            publisher: None,
+            current_version: None,
             created_at: now,
             updated_at: now,
             idempotency_key: None,
@@ -173,13 +200,24 @@ mod tests {
         let project_id = ProjectId::new();
         let type_id = AssetTypeId::new();
 
-        let asset = AssetInstance::new_project_level("Test Asset", type_id, project_id, org_id);
+        let asset = AssetInstance::new_project_level(
+            "Test Asset",
+            type_id,
+            project_id,
+            org_id,
+            "https://example.com/asset/1",
+            "manual",
+            serde_json::json!({"title": "Test"}),
+        );
 
         assert_eq!(asset.name, "Test Asset");
         assert_eq!(asset.level, AssetLevel::Project);
         assert_eq!(asset.project_id, Some(project_id));
         assert_eq!(asset.organization_id, org_id);
         assert_eq!(asset.current_state, AssetState::Clean);
+        assert_eq!(asset.external_ref, "https://example.com/asset/1");
+        assert_eq!(asset.source, "manual");
+        assert!(asset.assignees.is_empty());
     }
 
     #[test]
@@ -187,12 +225,20 @@ mod tests {
         let org_id = OrganizationId::new();
         let type_id = AssetTypeId::new();
 
-        let asset = AssetInstance::new_organization_level("Org Standard", type_id, org_id);
+        let asset = AssetInstance::new_organization_level(
+            "Org Standard",
+            type_id,
+            org_id,
+            "https://wiki.example.com/standards",
+            "wiki",
+            serde_json::json!({"category": "standard"}),
+        );
 
         assert_eq!(asset.name, "Org Standard");
         assert_eq!(asset.level, AssetLevel::Organization);
         assert_eq!(asset.project_id, None);
         assert_eq!(asset.current_state, AssetState::Clean);
+        assert_eq!(asset.source, "wiki");
     }
 
     #[test]

@@ -13,7 +13,8 @@ tower-http = { workspace = true, features = ["cors", "trace"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-rmcp = { workspace = true }
+rmcp = { workspace = true, features = ["server", "macros"] }
+schemars = { workspace = true }
 validator = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }

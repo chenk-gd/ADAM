@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 adam-domain = { path = "../adam-domain" }
+async-trait = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
@@ -18,6 +19,7 @@ redis = { workspace = true, optional = true }
 [features]
 default = []
 cache = ["dep:redis"]
+postgres = []
 
 [dev-dependencies]
 tokio-test = { workspace = true }
