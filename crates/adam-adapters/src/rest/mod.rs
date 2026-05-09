@@ -3,7 +3,7 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -11,10 +11,109 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use adam_application::services::state_propagator::{StatePropagationError, StatePropagator};
 use adam_domain::{
     AssetId, AssetInstance, AssetRepository, AssetState, AssetTypeId, CreateAssetCommand,
     DependencyRepository, DirtyQueueRepository, OrganizationId, ProjectId, RepositoryError,
 };
+
+// ============================================================================
+// Authentication Types
+// ============================================================================
+
+/// Authentication principal extracted from JWT/token
+/// Mirrors architecture.md AuthPrincipal definition
+#[derive(Debug, Clone)]
+pub struct AuthPrincipal {
+    pub id: String,
+    pub organization_id: OrganizationId,
+    pub project_memberships: Vec<ProjectId>,
+}
+
+/// Authentication context passed to handlers
+#[derive(Debug, Clone)]
+pub struct AuthContext {
+    pub principal: AuthPrincipal,
+}
+
+/// Auth extraction error
+#[derive(Debug, thiserror::Error)]
+pub enum AuthError {
+    #[error("Missing authorization header")]
+    MissingHeader,
+    #[error("Invalid authorization format")]
+    InvalidFormat,
+    #[error("Invalid token")]
+    InvalidToken,
+}
+
+impl IntoResponse for AuthError {
+    fn into_response(self) -> axum::response::Response {
+        let status = StatusCode::UNAUTHORIZED;
+        let body = Json(ErrorResponse {
+            error: self.to_string(),
+        });
+        (status, body).into_response()
+    }
+}
+
+/// Extract AuthPrincipal from Authorization header
+/// For MVP: parses "Bearer {org_id}:{user_id}" format
+pub fn extract_auth_principal(headers: &HeaderMap) -> Result<AuthPrincipal, AuthError> {
+    let auth_header = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .ok_or(AuthError::MissingHeader)?;
+
+    if !auth_header.starts_with("Bearer ") {
+        return Err(AuthError::InvalidFormat);
+    }
+
+    let token = auth_header[7..].trim();
+
+    // Simple token format for MVP: "org_id:user_id:project1,project2"
+    // In production, this would validate a JWT
+    let parts: Vec<&str> = token.split(':').collect();
+    if parts.len() < 2 {
+        return Err(AuthError::InvalidToken);
+    }
+
+    let org_id = Uuid::parse_str(parts[0]).map_err(|_| AuthError::InvalidToken)?;
+    let user_id = parts[1].to_string();
+
+    let project_memberships = if parts.len() >= 3 {
+        parts[2]
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| Uuid::parse_str(s).ok())
+            .map(ProjectId::from_uuid)
+            .collect()
+    } else {
+        vec![]
+    };
+
+    Ok(AuthPrincipal {
+        id: user_id,
+        organization_id: OrganizationId::from_uuid(org_id),
+        project_memberships,
+    })
+}
+
+/// axum extractor for AuthContext
+#[derive(Debug, Clone)]
+pub struct ExtractAuth(pub AuthContext);
+
+impl axum::extract::FromRequestParts<AppState> for ExtractAuth {
+    type Rejection = AuthError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let principal = extract_auth_principal(&parts.headers)?;
+        Ok(ExtractAuth(AuthContext { principal }))
+    }
+}
 
 // ============================================================================
 // Error Types
@@ -31,13 +130,19 @@ pub enum ApiError {
     Repository(#[from] RepositoryError),
     #[error("Internal server error")]
     Internal,
+    #[error("Unauthorized")]
+    Unauthorized,
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
+    #[error("Conflict: {0}")]
+    Conflict(String),
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        let (status, message) = match self {
+        let (status, message) = match &self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             ApiError::Repository(RepositoryError::NotFound(_)) => {
                 (StatusCode::NOT_FOUND, "Asset not found".to_string())
             }
@@ -50,10 +155,27 @@ impl IntoResponse for ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
             ),
+            ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
+            ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
+            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
         };
 
         let body = Json(ErrorResponse { error: message });
         (status, body).into_response()
+    }
+}
+
+impl From<StatePropagationError> for ApiError {
+    fn from(err: StatePropagationError) -> Self {
+        match err {
+            StatePropagationError::ArchivedAssetCannotTrigger => {
+                ApiError::Conflict("Cannot publish archived asset".to_string())
+            }
+            StatePropagationError::DownstreamAssetNotFound(id) => {
+                ApiError::BadRequest(format!("Downstream asset not found: {id:?}"))
+            }
+            StatePropagationError::Repository(e) => ApiError::Repository(e),
+        }
     }
 }
 
@@ -68,15 +190,17 @@ struct ErrorResponse {
 // ============================================================================
 
 /// Create asset request
+/// Note: organization_id is NOT in the request body - it comes from AuthPrincipal
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CreateAssetRequest {
     pub name: String,
     pub asset_type_id: Uuid,
-    pub organization_id: Uuid,
     pub project_id: Option<Uuid>,
     pub level: AssetLevelDto,
     pub idempotency_key: Option<String>,
+    /// Optional: declare dependencies at creation time
+    pub dependencies: Option<Vec<Uuid>>,
 }
 
 /// Asset level DTO for serialization
@@ -154,10 +278,11 @@ impl From<AssetInstance> for AssetResponse {
 }
 
 /// Query parameters for listing assets
+/// Per FR-026: project_id is required and returns project assets + org-level assets
 #[derive(Debug, Deserialize)]
 pub struct ListAssetsQuery {
-    pub project_id: Option<Uuid>,
-    pub organization_id: Option<Uuid>,
+    /// Required: project to scope the query
+    pub project_id: Uuid,
 }
 
 /// Publish version request
@@ -195,18 +320,24 @@ pub struct AppState {
 // ============================================================================
 
 /// Create a new asset
+/// Organization context comes from AuthPrincipal, not request body
 pub async fn create_asset(
     State(state): State<AppState>,
+    ExtractAuth(auth): ExtractAuth,
     Json(req): Json<CreateAssetRequest>,
 ) -> Result<(StatusCode, Json<AssetResponse>), ApiError> {
+    // Organization comes from authenticated principal, not request body
     let cmd = CreateAssetCommand {
         name: req.name,
         asset_type_id: AssetTypeId::from_uuid(req.asset_type_id),
         project_id: req.project_id.map(ProjectId::from_uuid),
-        organization_id: OrganizationId::from_uuid(req.organization_id),
+        organization_id: auth.principal.organization_id,
         level: req.level.into(),
         idempotency_key: req.idempotency_key,
     };
+
+    // TODO: Validate project membership for project-level assets
+    // TODO: Validate dependencies if provided
 
     let asset = state
         .asset_repo
@@ -220,6 +351,7 @@ pub async fn create_asset(
 /// Get asset by ID
 pub async fn get_asset(
     State(state): State<AppState>,
+    ExtractAuth(_auth): ExtractAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<AssetResponse>, ApiError> {
     let asset_id = AssetId::from_uuid(id);
@@ -230,44 +362,58 @@ pub async fn get_asset(
         .map_err(ApiError::from)?
         .ok_or(ApiError::NotFound)?;
 
+    // TODO: Verify asset is accessible by the authenticated principal
+    // (same organization, and project-level assets require project membership)
+
     Ok(Json(asset.into()))
 }
 
-/// List assets with optional filters
+/// List assets for a project
+/// Per FR-026: Returns project-level assets + organization-level assets
 pub async fn list_assets(
     State(state): State<AppState>,
+    ExtractAuth(auth): ExtractAuth,
     Query(query): Query<ListAssetsQuery>,
 ) -> Result<Json<Vec<AssetResponse>>, ApiError> {
-    let assets = if let Some(project_id) = query.project_id {
-        let pid = ProjectId::from_uuid(project_id);
-        state
-            .asset_repo
-            .find_by_project_id(&pid)
-            .await
-            .map_err(ApiError::from)?
-    } else if let Some(org_id) = query.organization_id {
-        let oid = OrganizationId::from_uuid(org_id);
-        state
-            .asset_repo
-            .find_by_organization_id(&oid)
-            .await
-            .map_err(ApiError::from)?
-    } else {
-        // Without filters, return empty list (or could return all)
-        vec![]
-    };
+    let project_id = ProjectId::from_uuid(query.project_id);
 
-    Ok(Json(assets.into_iter().map(AssetResponse::from).collect()))
+    // Get project-level assets
+    let project_assets = state
+        .asset_repo
+        .find_by_project_id(&project_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    // Get organization-level assets from the same org as the authenticated principal
+    let org_assets = state
+        .asset_repo
+        .find_by_organization_id(&auth.principal.organization_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    // Merge: project assets + org-level assets
+    let mut all_assets: Vec<AssetResponse> = project_assets
+        .into_iter()
+        .map(AssetResponse::from)
+        .collect();
+
+    // Add org-level assets (those without project_id)
+    for asset in org_assets {
+        if asset.project_id.is_none() {
+            all_assets.push(asset.into());
+        }
+    }
+
+    Ok(Json(all_assets))
 }
 
 /// Publish a new version (triggers dirty propagation)
 pub async fn publish_asset(
     State(state): State<AppState>,
+    ExtractAuth(_auth): ExtractAuth,
     Path(id): Path<Uuid>,
     Json(req): Json<PublishRequest>,
 ) -> Result<(StatusCode, Json<PublishResponse>), ApiError> {
-    use adam_application::services::state_propagator::StatePropagator;
-
     let asset_id = AssetId::from_uuid(id);
     let propagator = StatePropagator::new();
 
@@ -280,7 +426,7 @@ pub async fn publish_asset(
             state.dirty_repo.as_ref(),
         )
         .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        .map_err(ApiError::from)?;
 
     Ok((
         StatusCode::OK,
@@ -291,19 +437,48 @@ pub async fn publish_asset(
 }
 
 /// Resolve dirty state
+/// Per architecture: resolve dirty queue entries first, only mark Clean when no unresolved remain
 pub async fn resolve_dirty(
     State(state): State<AppState>,
+    ExtractAuth(_auth): ExtractAuth,
     Path(id): Path<Uuid>,
     Json(_req): Json<ResolveRequest>,
 ) -> Result<StatusCode, ApiError> {
     let asset_id = AssetId::from_uuid(id);
 
-    // Update asset state to Clean
-    state
-        .asset_repo
-        .update_state(&asset_id, AssetState::Clean)
+    // Check for unresolved dirty queue entries for this asset
+    let unresolved = state
+        .dirty_repo
+        .find_unresolved_by_asset(&asset_id)
         .await
         .map_err(ApiError::from)?;
+
+    if !unresolved.is_empty() {
+        // Mark all unresolved entries as resolved
+        for entry in unresolved {
+            state
+                .dirty_repo
+                .resolve(&entry.id)
+                .await
+                .map_err(ApiError::from)?;
+        }
+    }
+
+    // Check again if there are any remaining unresolved entries
+    let remaining = state
+        .dirty_repo
+        .find_unresolved_by_asset(&asset_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    // Only mark as Clean if no unresolved entries remain
+    if remaining.is_empty() {
+        state
+            .asset_repo
+            .update_state(&asset_id, AssetState::Clean)
+            .await
+            .map_err(ApiError::from)?;
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -312,13 +487,22 @@ pub async fn resolve_dirty(
 // Router
 // ============================================================================
 
-/// Create the REST API router
+/// Create the REST API router with protected routes
 pub fn create_router(state: AppState) -> Router {
-    Router::new()
+    // Protected routes - require authentication
+    let protected_routes = Router::new()
         .route("/api/v1/assets", post(create_asset).get(list_assets))
         .route("/api/v1/assets/{id}", get(get_asset))
         .route("/api/v1/assets/{id}/publish", post(publish_asset))
-        .route("/api/v1/assets/{id}/resolve", post(resolve_dirty))
+        .route("/api/v1/assets/{id}/resolve", post(resolve_dirty));
+
+    // Public routes (if any) would go here
+    // let public_routes = Router::new()
+    //     .route("/health", get(health_check));
+
+    Router::new()
+        .merge(protected_routes)
+        // .merge(public_routes)
         .with_state(state)
 }
 
@@ -339,6 +523,17 @@ mod tests {
             dependency_repo: Arc::new(InMemoryDependencyRepository::new()),
             dirty_repo: Arc::new(adam_domain::InMemoryDirtyQueueRepository::new()),
         }
+    }
+
+    /// Generate a test authorization header
+    fn test_auth_header(org_id: Uuid, user_id: &str, project_ids: &[Uuid]) -> (String, String) {
+        let projects = project_ids
+            .iter()
+            .map(|u| u.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let token = format!("{}:{}:{}", org_id, user_id, projects);
+        ("authorization".to_string(), format!("Bearer {}", token))
     }
 
     use async_trait::async_trait;
@@ -386,7 +581,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_asset_endpoint_returns_201() {
+    async fn create_asset_without_auth_returns_401() {
         let state = create_test_state();
         let app = create_router(state);
 
@@ -400,7 +595,6 @@ mod tests {
                         serde_json::json!({
                             "name": "Test Asset",
                             "asset_type_id": Uuid::new_v4(),
-                            "organization_id": Uuid::new_v4(),
                             "level": "project",
                             "project_id": Uuid::new_v4(),
                         })
@@ -411,20 +605,17 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::CREATED);
-
-        // Verify response body
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let asset: AssetResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(asset.name, "Test Asset");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn create_asset_with_invalid_level_returns_422() {
+    async fn create_asset_endpoint_returns_201() {
         let state = create_test_state();
         let app = create_router(state);
+
+        let org_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[project_id]);
 
         let response = app
             .oneshot(
@@ -432,8 +623,49 @@ mod tests {
                     .method(Method::POST)
                     .uri("/api/v1/assets")
                     .header("content-type", "application/json")
+                    .header(&auth_header, &auth_value)
                     .body(Body::from(
-                        r#"{"name": "Test", "asset_type_id": "00000000-0000-0000-0000-000000000001", "organization_id": "00000000-0000-0000-0000-000000000002", "level": "invalid"}"#,
+                        serde_json::json!({
+                            "name": "Test Asset",
+                            "asset_type_id": Uuid::new_v4(),
+                            "level": "project",
+                            "project_id": project_id,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // Verify response body - organization_id should come from auth, not request
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let asset: AssetResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(asset.name, "Test Asset");
+        assert_eq!(asset.organization_id, org_id); // From auth context
+    }
+
+    #[tokio::test]
+    async fn create_asset_with_invalid_level_returns_422() {
+        let state = create_test_state();
+        let app = create_router(state);
+
+        let org_id = Uuid::new_v4();
+        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[]);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/assets")
+                    .header("content-type", "application/json")
+                    .header(&auth_header, &auth_value)
+                    .body(Body::from(
+                        r#"{"name": "Test", "asset_type_id": "00000000-0000-0000-0000-000000000001", "level": "invalid"}"#,
                     ))
                     .unwrap(),
             )
@@ -445,11 +677,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_asset_returns_401_without_auth() {
+        let state = create_test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/v1/assets/{}", Uuid::new_v4()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn get_asset_returns_200_for_existing() {
         let state = create_test_state();
+        let org_id = OrganizationId::from_uuid(Uuid::new_v4());
 
         // First create an asset
-        let org_id = OrganizationId::new();
         let type_id = AssetTypeId::new();
         let cmd = CreateAssetCommand {
             name: "Existing Asset".to_string(),
@@ -462,11 +713,14 @@ mod tests {
         let asset = state.asset_repo.create(&cmd).await.unwrap();
 
         let app = create_router(state);
+        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-123", &[]);
+
         let response = app
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
                     .uri(format!("/api/v1/assets/{}", asset.id.0))
+                    .header(&auth_header, &auth_value)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -487,11 +741,15 @@ mod tests {
         let state = create_test_state();
         let app = create_router(state);
 
+        let org_id = Uuid::new_v4();
+        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[]);
+
         let response = app
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
                     .uri(format!("/api/v1/assets/{}", Uuid::new_v4()))
+                    .header(&auth_header, &auth_value)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -502,37 +760,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_assets_returns_empty_when_no_filter() {
+    async fn list_assets_requires_project_id() {
         let state = create_test_state();
         let app = create_router(state);
 
+        let org_id = Uuid::new_v4();
+        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[]);
+
+        // Without project_id query param, should fail (400 - missing required param)
         let response = app
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
                     .uri("/api/v1/assets")
+                    .header(&auth_header, &auth_value)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let assets: Vec<AssetResponse> = serde_json::from_slice(&body).unwrap();
-        assert!(assets.is_empty());
+        // Query parameter is required per FR-026 - axum returns 400 for missing required params
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
-    async fn list_assets_by_organization_returns_assets() {
+    async fn list_assets_returns_project_and_org_level_assets() {
         let state = create_test_state();
-        let org_id = OrganizationId::new();
+        let org_id = OrganizationId::from_uuid(Uuid::new_v4());
+        let project_id = ProjectId::new();
 
-        // Create an asset
-        let cmd = CreateAssetCommand {
+        // Create a project-level asset
+        let project_cmd = CreateAssetCommand {
+            name: "Project Asset".to_string(),
+            asset_type_id: AssetTypeId::new(),
+            project_id: Some(project_id),
+            organization_id: org_id,
+            level: adam_domain::dependency::boundary::AssetLevel::Project,
+            idempotency_key: None,
+        };
+        state.asset_repo.create(&project_cmd).await.unwrap();
+
+        // Create an organization-level asset
+        let org_cmd = CreateAssetCommand {
             name: "Org Asset".to_string(),
             asset_type_id: AssetTypeId::new(),
             project_id: None,
@@ -540,14 +810,17 @@ mod tests {
             level: adam_domain::dependency::boundary::AssetLevel::Organization,
             idempotency_key: None,
         };
-        state.asset_repo.create(&cmd).await.unwrap();
+        state.asset_repo.create(&org_cmd).await.unwrap();
 
         let app = create_router(state);
+        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-123", &[]);
+
         let response = app
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri(format!("/api/v1/assets?organization_id={}", org_id.0))
+                    .uri(format!("/api/v1/assets?project_id={}", project_id.0))
+                    .header(&auth_header, &auth_value)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -560,7 +833,102 @@ mod tests {
             .await
             .unwrap();
         let assets: Vec<AssetResponse> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(assets.len(), 1);
-        assert_eq!(assets[0].name, "Org Asset");
+
+        // Should return both project asset and org-level asset
+        assert_eq!(assets.len(), 2);
+        assert!(assets.iter().any(|a| a.name == "Project Asset"));
+        assert!(assets.iter().any(|a| a.name == "Org Asset"));
+    }
+
+    #[tokio::test]
+    async fn list_assets_requires_auth() {
+        let state = create_test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/assets?project_id=00000000-0000-0000-0000-000000000001")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn resolve_dirty_resolves_queue_entries_and_sets_clean() {
+        let state = create_test_state();
+        let org_id = OrganizationId::new();
+
+        // Create a dirty asset - use the returned asset which has the actual ID
+        let created_asset = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Dirty Asset".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: None,
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Organization,
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        // Create a dirty queue entry for this asset
+        let entry = adam_domain::DirtyQueueEntry {
+            id: uuid::Uuid::new_v4(),
+            asset_id: created_asset.id,
+            upstream_asset_id: AssetId::new(),
+            upstream_version: "v1.0.0".to_string(),
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
+        };
+        state.dirty_repo.upsert(&entry).await.unwrap();
+
+        // Update asset to Dirty state
+        state
+            .asset_repo
+            .update_state(&created_asset.id, AssetState::Dirty)
+            .await
+            .unwrap();
+
+        let app = create_router(state.clone());
+        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-123", &[]);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/v1/assets/{}/resolve", created_asset.id.0))
+                    .header("content-type", "application/json")
+                    .header(&auth_header, &auth_value)
+                    .body(Body::from(r#"{"resolved_version": "v1.0.0"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify the dirty queue entry is resolved
+        let unresolved = state
+            .dirty_repo
+            .find_unresolved_by_asset(&created_asset.id)
+            .await
+            .unwrap();
+        assert!(unresolved.is_empty());
+
+        // Verify asset is now Clean
+        let updated = state
+            .asset_repo
+            .find_by_id(&created_asset.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.current_state, AssetState::Clean);
     }
 }
