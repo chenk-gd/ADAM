@@ -1,0 +1,389 @@
+openapi: 3.1.0
+info:
+  title: ADAM REST API
+  description: Research and Development Asset Management System REST API
+  version: 0.1.0
+  contact:
+    name: ADAM Team
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Public endpoint for service health monitoring
+      operationId: healthCheck
+      tags:
+        - System
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /api/v1/assets:
+    get:
+      summary: List assets
+      description: |
+        Retrieves assets for a specific project, including both project-level
+        and organization-level assets (per FR-026).
+      operationId: listAssets
+      tags:
+        - Assets
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: query
+          required: true
+          description: UUID of the project to query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Assets retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AssetResponse'
+        '400':
+          description: Missing required project_id parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      summary: Create asset
+      description: Creates a new asset instance
+      operationId: createAsset
+      tags:
+        - Assets
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAssetRequest'
+      responses:
+        '201':
+          description: Asset created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetResponse'
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Duplicate idempotency key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/assets/{id}:
+    get:
+      summary: Get asset
+      description: Retrieves a specific asset by ID
+      operationId: getAsset
+      tags:
+        - Assets
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Asset UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Asset found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Asset not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/assets/{id}/publish:
+    post:
+      summary: Publish asset version
+      description: |
+        Publishes a new version of an asset, triggering dirty state
+        propagation to downstream dependencies.
+      operationId: publishAsset
+      tags:
+        - Assets
+        - Versions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Asset UUID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishRequest'
+      responses:
+        '200':
+          description: Published successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Asset not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Cannot publish archived asset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/assets/{id}/resolve:
+    post:
+      summary: Resolve dirty state
+      description: |
+        Marks an asset's dirty state as resolved after reviewing
+        upstream changes.
+      operationId: resolveDirty
+      tags:
+        - Assets
+        - Dirty Queue
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Asset UUID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResolveRequest'
+      responses:
+        '204':
+          description: Resolved successfully
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Asset or dirty queue entry not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    CreateAssetRequest:
+      type: object
+      required:
+        - name
+        - asset_type_id
+        - level
+      properties:
+        name:
+          type: string
+          description: Asset name
+          example: "User Service API"
+        asset_type_id:
+          type: string
+          format: uuid
+          description: Asset type UUID
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        project_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: For project-level assets
+          example: "660e8400-e29b-41d4-a716-446655440001"
+        level:
+          $ref: '#/components/schemas/AssetLevel'
+        idempotency_key:
+          type: string
+          nullable: true
+          description: Prevent duplicate creation
+          example: "git:org1:proj1:abc123"
+        dependencies:
+          type: array
+          items:
+            type: string
+            format: uuid
+          nullable: true
+          description: Asset dependencies
+
+    AssetResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        asset_type_id:
+          type: string
+          format: uuid
+        organization_id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+          nullable: true
+        level:
+          $ref: '#/components/schemas/AssetLevel'
+        current_state:
+          $ref: '#/components/schemas/AssetState'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AssetLevel:
+      type: string
+      enum:
+        - project
+        - organization
+      description: |
+        project: Asset belongs to a specific project
+        organization: Asset is shared across all projects
+
+    AssetState:
+      type: string
+      enum:
+        - clean
+        - dirty
+        - archived
+      description: |
+        clean: Asset is up-to-date with upstream dependencies
+        dirty: An upstream dependency has a newer version
+        archived: Asset is read-only and no longer maintained
+
+    PublishRequest:
+      type: object
+      required:
+        - version
+      properties:
+        version:
+          type: string
+          description: Semantic version
+          example: "v2.0.0"
+
+    PublishResponse:
+      type: object
+      properties:
+        affected_assets:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: UUIDs of downstream assets marked as dirty
+
+    ResolveRequest:
+      type: object
+      required:
+        - resolved_version
+      properties:
+        resolved_version:
+          type: string
+          description: Version being resolved to
+          example: "v2.0.0"
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "healthy"
+        version:
+          type: string
+          example: "0.1.0"
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Bearer token in format: `{org_id}:{user_id}:{project1,project2,...}`
+        For MVP, this is a simple format. Production uses JWT.
