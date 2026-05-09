@@ -9,7 +9,7 @@ adam-domain = { path = "../adam-domain" }
 adam-application = { path = "../adam-application" }
 axum = { workspace = true }
 tower = { workspace = true }
-tower-http = { workspace = true }
+tower-http = { workspace = true, features = ["cors", "trace"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

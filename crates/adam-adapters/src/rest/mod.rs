@@ -9,6 +9,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tower_http::{
+    cors::{Any, CorsLayer},
+    trace::{DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer},
+};
+use tracing::Level;
 use uuid::Uuid;
 
 use adam_application::services::state_propagator::{StatePropagationError, StatePropagator};
@@ -487,7 +492,7 @@ pub async fn resolve_dirty(
 // Router
 // ============================================================================
 
-/// Create the REST API router with protected routes
+/// Create the REST API router with middleware layers
 pub fn create_router(state: AppState) -> Router {
     // Protected routes - require authentication
     let protected_routes = Router::new()
@@ -497,13 +502,41 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/assets/{id}/resolve", post(resolve_dirty));
 
     // Public routes (if any) would go here
-    // let public_routes = Router::new()
-    //     .route("/health", get(health_check));
+    let public_routes = Router::new().route("/health", get(health_check));
 
     Router::new()
         .merge(protected_routes)
-        // .merge(public_routes)
+        .merge(public_routes)
+        // Add CORS layer
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
+        // Add tracing layer
+        .layer(
+            TraceLayer::new_for_http()
+                .on_request(DefaultOnRequest::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO))
+                .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
+        )
         .with_state(state)
+}
+
+/// Health check handler - public endpoint
+async fn health_check() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "healthy".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
+}
+
+/// Health check response
+#[derive(Debug, Serialize)]
+struct HealthResponse {
+    status: String,
+    version: String,
 }
 
 // ============================================================================
@@ -930,5 +963,31 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(updated.current_state, AssetState::Clean);
+    }
+
+    #[tokio::test]
+    async fn health_check_returns_200() {
+        let state = create_test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(health["status"], "healthy");
+        assert!(health["version"].as_str().is_some());
     }
 }
