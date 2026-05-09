@@ -1,5 +1,7 @@
 //! Repository traits for asset management
 
+pub mod in_memory;
+
 use crate::asset::instance::{AssetId, AssetInstance};
 use crate::asset::state::AssetState;
 use async_trait::async_trait;
@@ -43,11 +45,7 @@ pub trait AssetRepository: Send + Sync {
     async fn find_by_id(&self, id: &AssetId) -> Result<Option<AssetInstance>, RepositoryError>;
 
     /// Update asset state
-    async fn update_state(
-        &self,
-        id: &AssetId,
-        state: AssetState,
-    ) -> Result<(), RepositoryError>;
+    async fn update_state(&self, id: &AssetId, state: AssetState) -> Result<(), RepositoryError>;
 
     /// Find assets by project ID
     async fn find_by_project_id(
@@ -86,10 +84,7 @@ pub trait DirtyQueueRepository: Send + Sync {
     ) -> Result<Vec<DirtyQueueEntry>, RepositoryError>;
 
     /// Mark an entry as resolved
-    async fn resolve(
-        &self,
-        entry_id: &uuid::Uuid,
-    ) -> Result<(), RepositoryError>;
+    async fn resolve(&self, entry_id: &uuid::Uuid) -> Result<(), RepositoryError>;
 
     /// Find all unresolved entries
     async fn find_all_unresolved(&self) -> Result<Vec<DirtyQueueEntry>, RepositoryError>;

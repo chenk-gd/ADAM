@@ -1,9 +1,8 @@
 //! State propagation service
 
 use adam_domain::{
-    AssetId, AssetInstance, AssetRepository, AssetState, AssetTypeId, CreateAssetCommand,
-    DependencyRepository, DirtyQueueEntry, DirtyQueueRepository, OrganizationId, ProjectId,
-    RepositoryError,
+    AssetId, AssetRepository, AssetState, DependencyRepository, DirtyQueueEntry,
+    DirtyQueueRepository, RepositoryError,
 };
 
 /// Error types for state propagation
@@ -15,10 +14,19 @@ pub enum StatePropagationError {
     /// Asset is archived and cannot trigger propagation
     #[error("Archived asset cannot trigger propagation")]
     ArchivedAssetCannotTrigger,
+    /// Downstream asset not found
+    #[error("Downstream asset not found: {0:?}")]
+    DownstreamAssetNotFound(AssetId),
 }
 
 /// Service for propagating state changes through the dependency graph
 pub struct StatePropagator;
+
+impl Default for StatePropagator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl StatePropagator {
     /// Create a new StatePropagator
@@ -50,14 +58,20 @@ impl StatePropagator {
         let mut affected = Vec::new();
 
         for downstream_id in downstream {
-            let downstream_asset = asset_repo.find_by_id(&downstream_id).await?;
+            // Fetch downstream asset - must exist
+            let downstream_asset = asset_repo.find_by_id(&downstream_id).await?.ok_or(
+                StatePropagationError::DownstreamAssetNotFound(downstream_id),
+            )?;
 
             // Skip archived downstream assets
-            if let Some(downstream) = downstream_asset {
-                if downstream.is_archived() {
-                    continue;
-                }
+            if downstream_asset.is_archived() {
+                continue;
             }
+
+            // Update downstream asset state to Dirty
+            asset_repo
+                .update_state(&downstream_id, AssetState::Dirty)
+                .await?;
 
             // Create or update dirty queue entry
             let entry = DirtyQueueEntry {
@@ -81,73 +95,19 @@ impl StatePropagator {
 mod tests {
     use super::*;
     use adam_domain::{
-        AssetId, AssetInstance, AssetRepository, AssetState, AssetTypeId, CreateAssetCommand,
-        DependencyRepository, DirtyQueueEntry, DirtyQueueRepository, OrganizationId, ProjectId,
-        RepositoryError,
+        AssetId, AssetInstance, AssetState, AssetTypeId, DependencyRepository, DirtyQueueEntry,
+        DirtyQueueRepository, InMemoryAssetRepository, InMemoryDirtyQueueRepository,
+        OrganizationId, RepositoryError,
     };
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Mutex;
-
-    struct InMemoryAssetRepo {
-        data: Mutex<HashMap<AssetId, AssetInstance>>,
-    }
-
-    impl InMemoryAssetRepo {
-        fn new() -> Self {
-            Self {
-                data: Mutex::new(HashMap::new()),
-            }
-        }
-
-        fn with_data(assets: Vec<AssetInstance>) -> Self {
-            let map: HashMap<_, _> = assets.into_iter().map(|a| (a.id, a)).collect();
-            Self { data: Mutex::new(map) }
-        }
-    }
-
-    #[async_trait]
-    impl AssetRepository for InMemoryAssetRepo {
-        async fn create(
-            &self,
-            _cmd: &CreateAssetCommand,
-        ) -> Result<AssetInstance, RepositoryError> {
-            unimplemented!()
-        }
-        async fn find_by_id(
-            &self,
-            id: &AssetId,
-        ) -> Result<Option<AssetInstance>, RepositoryError> {
-            Ok(self.data.lock().unwrap().get(id).cloned())
-        }
-        async fn update_state(&self, _id: &AssetId, _state: AssetState) -> Result<(), RepositoryError> {
-            Ok(())
-        }
-        async fn find_by_project_id(
-            &self,
-            _id: &ProjectId,
-        ) -> Result<Vec<AssetInstance>, RepositoryError> {
-            Ok(Vec::new())
-        }
-        async fn find_by_organization_id(
-            &self,
-            _id: &OrganizationId,
-        ) -> Result<Vec<AssetInstance>, RepositoryError> {
-            Ok(Vec::new())
-        }
-    }
 
     struct InMemoryDependencyRepo {
         downstream: Mutex<HashMap<AssetId, Vec<AssetId>>>,
     }
 
     impl InMemoryDependencyRepo {
-        fn new() -> Self {
-            Self {
-                downstream: Mutex::new(HashMap::new()),
-            }
-        }
-
         fn with_dependency(source: AssetId, target: AssetId) -> Self {
             let mut map = HashMap::new();
             map.insert(target, vec![source]); // source depends on target
@@ -171,7 +131,10 @@ mod tests {
                 .cloned()
                 .unwrap_or_default())
         }
-        async fn find_upstream(&self, _asset_id: &AssetId) -> Result<Vec<AssetId>, RepositoryError> {
+        async fn find_upstream(
+            &self,
+            _asset_id: &AssetId,
+        ) -> Result<Vec<AssetId>, RepositoryError> {
             Ok(Vec::new())
         }
         async fn create_dependency(
@@ -180,49 +143,6 @@ mod tests {
             _target: &AssetId,
         ) -> Result<(), RepositoryError> {
             Ok(())
-        }
-    }
-
-    struct InMemoryDirtyQueueRepo {
-        data: Mutex<Vec<DirtyQueueEntry>>,
-    }
-
-    impl InMemoryDirtyQueueRepo {
-        fn new() -> Self {
-            Self {
-                data: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl DirtyQueueRepository for InMemoryDirtyQueueRepo {
-        async fn upsert(&self, entry: &DirtyQueueEntry) -> Result<(), RepositoryError> {
-            let mut data = self.data.lock().unwrap();
-            // Check for existing unresolved entry
-            if let Some(existing) = data.iter_mut().find(|e| {
-                e.asset_id == entry.asset_id
-                    && e.upstream_asset_id == entry.upstream_asset_id
-                    && e.resolved_at.is_none()
-            }) {
-                existing.upstream_version.clone_from(&entry.upstream_version);
-            } else {
-                data.push(entry.clone());
-            }
-            Ok(())
-        }
-
-        async fn find_unresolved_by_asset(
-            &self,
-            _asset_id: &AssetId,
-        ) -> Result<Vec<DirtyQueueEntry>, RepositoryError> {
-            Ok(Vec::new())
-        }
-        async fn resolve(&self, _entry_id: &uuid::Uuid) -> Result<(), RepositoryError> {
-            Ok(())
-        }
-        async fn find_all_unresolved(&self) -> Result<Vec<DirtyQueueEntry>, RepositoryError> {
-            Ok(Vec::new())
         }
     }
 
@@ -236,7 +156,11 @@ mod tests {
         let asset_b = AssetInstance::new_organization_level("Asset B", type_id, org_id);
         let asset_c = AssetInstance::new_organization_level("Asset C", type_id, org_id);
 
-        let asset_repo = InMemoryAssetRepo::with_data(vec![asset_a.clone(), asset_b.clone(), asset_c.clone()]);
+        let asset_repo = InMemoryAssetRepository::with_data(vec![
+            asset_a.clone(),
+            asset_b.clone(),
+            asset_c.clone(),
+        ]);
         let dependency_repo = InMemoryDependencyRepo {
             downstream: Mutex::new({
                 let mut map = HashMap::new();
@@ -244,12 +168,18 @@ mod tests {
                 map
             }),
         };
-        let dirty_repo = InMemoryDirtyQueueRepo::new();
+        let dirty_repo = InMemoryDirtyQueueRepository::new();
         let propagator = StatePropagator::new();
 
         // When A publishes v2.0.0
         let affected = propagator
-            .on_asset_published(&asset_a.id, "v2.0.0", &asset_repo, &dependency_repo, &dirty_repo)
+            .on_asset_published(
+                &asset_a.id,
+                "v2.0.0",
+                &asset_repo,
+                &dependency_repo,
+                &dirty_repo,
+            )
             .await
             .unwrap();
 
@@ -257,6 +187,12 @@ mod tests {
         assert_eq!(affected.len(), 2);
         assert!(affected.contains(&asset_b.id));
         assert!(affected.contains(&asset_c.id));
+
+        // Assert: B and C are now in Dirty state
+        let b = asset_repo.find_by_id(&asset_b.id).await.unwrap().unwrap();
+        let c = asset_repo.find_by_id(&asset_c.id).await.unwrap().unwrap();
+        assert_eq!(b.current_state, AssetState::Dirty);
+        assert_eq!(c.current_state, AssetState::Dirty);
     }
 
     #[tokio::test]
@@ -268,7 +204,7 @@ mod tests {
         let asset_b = AssetInstance::new_organization_level("Asset B", type_id, org_id);
 
         // Create initial dirty entry (from v1.0.0)
-        let dirty_repo = InMemoryDirtyQueueRepo {
+        let dirty_repo = InMemoryDirtyQueueRepository {
             data: Mutex::new(vec![DirtyQueueEntry {
                 id: uuid::Uuid::new_v4(),
                 asset_id: asset_b.id,
@@ -279,13 +215,19 @@ mod tests {
             }]),
         };
 
-        let asset_repo = InMemoryAssetRepo::with_data(vec![asset_a.clone(), asset_b.clone()]);
+        let asset_repo = InMemoryAssetRepository::with_data(vec![asset_a.clone(), asset_b.clone()]);
         let dependency_repo = InMemoryDependencyRepo::with_dependency(asset_b.id, asset_a.id);
         let propagator = StatePropagator::new();
 
         // When A publishes v2.0.0
         let affected = propagator
-            .on_asset_published(&asset_a.id, "v2.0.0", &asset_repo, &dependency_repo, &dirty_repo)
+            .on_asset_published(
+                &asset_a.id,
+                "v2.0.0",
+                &asset_repo,
+                &dependency_repo,
+                &dirty_repo,
+            )
             .await
             .unwrap();
 
@@ -310,8 +252,11 @@ mod tests {
 
         let asset_c = AssetInstance::new_organization_level("Asset C", type_id, org_id);
 
-        let asset_repo =
-            InMemoryAssetRepo::with_data(vec![asset_a.clone(), asset_b.clone(), asset_c.clone()]);
+        let asset_repo = InMemoryAssetRepository::with_data(vec![
+            asset_a.clone(),
+            asset_b.clone(),
+            asset_c.clone(),
+        ]);
         let dependency_repo = InMemoryDependencyRepo {
             downstream: Mutex::new({
                 let mut map = HashMap::new();
@@ -319,18 +264,30 @@ mod tests {
                 map
             }),
         };
-        let dirty_repo = InMemoryDirtyQueueRepo::new();
+        let dirty_repo = InMemoryDirtyQueueRepository::new();
         let propagator = StatePropagator::new();
 
         // When A publishes
         let affected = propagator
-            .on_asset_published(&asset_a.id, "v2.0.0", &asset_repo, &dependency_repo, &dirty_repo)
+            .on_asset_published(
+                &asset_a.id,
+                "v2.0.0",
+                &asset_repo,
+                &dependency_repo,
+                &dirty_repo,
+            )
             .await
             .unwrap();
 
         // Only C should be affected
         assert_eq!(affected.len(), 1);
         assert_eq!(affected[0], asset_c.id);
+
+        // B should remain Archived, C should be Dirty
+        let b = asset_repo.find_by_id(&asset_b.id).await.unwrap().unwrap();
+        let c = asset_repo.find_by_id(&asset_c.id).await.unwrap().unwrap();
+        assert_eq!(b.current_state, AssetState::Archived);
+        assert_eq!(c.current_state, AssetState::Dirty);
     }
 
     #[tokio::test]
@@ -344,14 +301,20 @@ mod tests {
 
         let asset_b = AssetInstance::new_organization_level("Asset B", type_id, org_id);
 
-        let asset_repo = InMemoryAssetRepo::with_data(vec![asset_a.clone(), asset_b.clone()]);
+        let asset_repo = InMemoryAssetRepository::with_data(vec![asset_a.clone(), asset_b.clone()]);
         let dependency_repo = InMemoryDependencyRepo::with_dependency(asset_b.id, asset_a.id);
-        let dirty_repo = InMemoryDirtyQueueRepo::new();
+        let dirty_repo = InMemoryDirtyQueueRepository::new();
         let propagator = StatePropagator::new();
 
         // When archived A tries to publish
         let result = propagator
-            .on_asset_published(&asset_a.id, "v2.0.0", &asset_repo, &dependency_repo, &dirty_repo)
+            .on_asset_published(
+                &asset_a.id,
+                "v2.0.0",
+                &asset_repo,
+                &dependency_repo,
+                &dirty_repo,
+            )
             .await;
 
         assert!(result.is_err());
@@ -362,6 +325,42 @@ mod tests {
 
         // Verify dirty queue is empty
         let entries = dirty_repo.data.lock().unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_downstream_asset_fails() {
+        let org_id = OrganizationId::new();
+        let type_id = AssetTypeId::new();
+
+        let asset_a = AssetInstance::new_organization_level("Asset A", type_id, org_id);
+        // Don't create asset_b - it will be missing
+        let asset_b = AssetInstance::new_organization_level("Asset B", type_id, org_id);
+
+        let asset_repo = InMemoryAssetRepository::with_data(vec![asset_a.clone()]); // B is missing
+        let dependency_repo = InMemoryDependencyRepo::with_dependency(asset_b.id, asset_a.id);
+        let dirty_repo = InMemoryDirtyQueueRepository::new();
+        let propagator = StatePropagator::new();
+
+        // When A publishes, should fail because B is in dependency but not in repo
+        let result = propagator
+            .on_asset_published(
+                &asset_a.id,
+                "v2.0.0",
+                &asset_repo,
+                &dependency_repo,
+                &dirty_repo,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            StatePropagationError::DownstreamAssetNotFound(_)
+        ));
+
+        // Verify no dirty entries were created
+        let entries = dirty_repo.find_all_unresolved().await.unwrap();
         assert!(entries.is_empty());
     }
 }

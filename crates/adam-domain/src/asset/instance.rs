@@ -33,6 +33,12 @@ impl AssetTypeId {
     }
 }
 
+impl Default for AssetTypeId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Unique identifier for projects
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProjectId(pub Uuid);
@@ -43,6 +49,12 @@ impl ProjectId {
     }
 }
 
+impl Default for ProjectId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Unique identifier for organizations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OrganizationId(pub Uuid);
@@ -50,6 +62,12 @@ pub struct OrganizationId(pub Uuid);
 impl OrganizationId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+}
+
+impl Default for OrganizationId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

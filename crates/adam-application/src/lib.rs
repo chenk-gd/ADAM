@@ -2,4 +2,4 @@
 
 pub mod services;
 
-pub use services::state_propagator::{StatePropagator, StatePropagationError};
+pub use services::state_propagator::{StatePropagationError, StatePropagator};
