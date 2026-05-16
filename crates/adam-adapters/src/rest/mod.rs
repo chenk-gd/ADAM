@@ -16,11 +16,16 @@ use tower_http::{
 use tracing::Level;
 use uuid::Uuid;
 
-use adam_application::services::state_propagator::{StatePropagationError, StatePropagator};
+use adam_application::services::{
+    AssetService, AssetServiceError, ManualCleanCommand, ManualCleanResolution,
+    PublishAssetCommand, PublishDependency, VersionService, VersionServiceError,
+    state_propagator::StatePropagationError,
+};
 use adam_domain::{
     AssetId, AssetInstance, AssetRepository, AssetState, AssetTypeId, AssetTypeRepository,
-    AuthPrincipal, AuthorizationError, CreateAssetCommand, DependencyRepository,
-    DirtyQueueRepository, OrganizationId, ProjectId, RepositoryError, Role,
+    AssetVersionRepository, AuthPrincipal, AuthorizationError, CreateAssetCommand,
+    DependencyRepository, DirtyQueueRepository, DirtyResolutionLogRepository, OrganizationId,
+    ProjectId, RepositoryError, Role,
 };
 
 // ============================================================================
@@ -198,6 +203,35 @@ impl From<StatePropagationError> for ApiError {
     }
 }
 
+impl From<AssetServiceError> for ApiError {
+    fn from(err: AssetServiceError) -> Self {
+        match err {
+            AssetServiceError::Repository(e) => ApiError::Repository(e),
+            AssetServiceError::CrossProjectDependencyNotAllowed => {
+                ApiError::BadRequest("Cross-project dependencies are not allowed".to_string())
+            }
+            AssetServiceError::ProjectDependsOnOrgNotAllowed => ApiError::BadRequest(
+                "Project-level assets cannot depend on organization-level assets".to_string(),
+            ),
+            AssetServiceError::InvalidLevel(msg) => ApiError::BadRequest(msg),
+        }
+    }
+}
+
+impl From<VersionServiceError> for ApiError {
+    fn from(err: VersionServiceError) -> Self {
+        match err {
+            VersionServiceError::Repository(e) => ApiError::Repository(e),
+            VersionServiceError::NotFound(_) => ApiError::NotFound,
+            VersionServiceError::InvalidVersion(msg) => ApiError::BadRequest(msg),
+            VersionServiceError::InvalidState(msg) => ApiError::Conflict(msg),
+            VersionServiceError::CycleDetected => {
+                ApiError::Conflict("Dependency cycle detected".to_string())
+            }
+        }
+    }
+}
+
 /// Error response body
 #[derive(Serialize)]
 struct ErrorResponse {
@@ -364,18 +398,39 @@ pub struct PaginatedResponse<T> {
 #[derive(Debug, Deserialize)]
 pub struct PublishRequest {
     pub version: String,
+    pub release_notes: Option<String>,
+    pub dependencies: Option<Vec<PublishDependencyRequest>>,
+    pub suggested_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PublishDependencyRequest {
+    pub upstream_asset_id: Uuid,
+    pub version: String,
 }
 
 /// Publish response
 #[derive(Debug, Serialize)]
 pub struct PublishResponse {
+    pub version: String,
     pub affected_assets: Vec<Uuid>,
 }
 
 /// Resolve dirty request
 #[derive(Debug, Deserialize)]
 pub struct ResolveRequest {
-    pub resolved_version: String,
+    pub resolved_version: Option<String>,
+    pub reviewed_by: Option<String>,
+    pub resolutions: Option<Vec<ManualCleanResolutionRequest>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ManualCleanResolutionRequest {
+    pub upstream_asset_id: Uuid,
+    pub from_version: String,
+    pub to_version: String,
+    pub review_result: String,
+    pub comment: Option<String>,
 }
 
 /// Update asset request (FR-007)
@@ -432,6 +487,8 @@ pub struct AppState {
     pub asset_type_repo: Arc<dyn AssetTypeRepository>,
     pub dependency_repo: Arc<dyn DependencyRepository>,
     pub dirty_repo: Arc<dyn DirtyQueueRepository>,
+    pub version_repo: Arc<dyn AssetVersionRepository>,
+    pub dirty_log_repo: Arc<dyn DirtyResolutionLogRepository>,
 }
 
 // ============================================================================
@@ -515,38 +572,23 @@ pub async fn create_asset(
         idempotency_key: req.idempotency_key,
     };
 
-    let asset = state
-        .asset_repo
-        .create(&cmd)
+    let dependency_ids = req
+        .dependencies
+        .unwrap_or_default()
+        .into_iter()
+        .map(AssetId::from_uuid)
+        .collect::<Vec<_>>();
+    let dependencies = if dependency_ids.is_empty() {
+        None
+    } else {
+        Some(dependency_ids.as_slice())
+    };
+
+    let asset_service = AssetService::new(state.asset_repo.clone(), state.dependency_repo.clone());
+    let asset = asset_service
+        .create(&cmd, dependencies)
         .await
         .map_err(ApiError::from)?;
-
-    // Create dependencies if provided
-    if let Some(dependency_ids) = req.dependencies {
-        for dep_id in dependency_ids {
-            let target_id = AssetId::from_uuid(dep_id);
-
-            // Verify the target asset exists
-            if state
-                .asset_repo
-                .find_by_id(&target_id)
-                .await
-                .map_err(ApiError::from)?
-                .is_none()
-            {
-                return Err(ApiError::BadRequest(format!(
-                    "Dependency asset not found: {dep_id}"
-                )));
-            }
-
-            // Create the dependency relationship
-            state
-                .dependency_repo
-                .create_dependency(&asset.id, &target_id)
-                .await
-                .map_err(ApiError::from)?;
-        }
-    }
 
     Ok((StatusCode::CREATED, Json(asset.into())))
 }
@@ -682,28 +724,72 @@ pub async fn list_assets(
 /// Publish a new version (triggers dirty propagation)
 pub async fn publish_asset(
     State(state): State<AppState>,
-    ExtractAuth(_auth): ExtractAuth,
+    ExtractAuth(auth): ExtractAuth,
     Path(id): Path<Uuid>,
     Json(req): Json<PublishRequest>,
 ) -> Result<(StatusCode, Json<PublishResponse>), ApiError> {
     let asset_id = AssetId::from_uuid(id);
-    let propagator = StatePropagator::new();
+    let asset = state
+        .asset_repo
+        .find_by_id(&asset_id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+    check_asset_access(&auth.principal, &asset).map_err(|_| {
+        ApiError::Forbidden("User cannot publish this asset".to_string())
+    })?;
 
-    let affected = propagator
-        .on_asset_published(
-            &asset_id,
-            &req.version,
-            state.asset_repo.as_ref(),
-            state.dependency_repo.as_ref(),
-            state.dirty_repo.as_ref(),
-        )
+    let service = VersionService::new(
+        state.asset_repo.clone(),
+        state.dirty_repo.clone(),
+        state.version_repo.clone(),
+        state.dependency_repo.clone(),
+        state.dirty_log_repo.clone(),
+    );
+    let version = service
+        .publish(PublishAssetCommand {
+            asset_id,
+            version: req.version,
+            publisher: auth.principal.id,
+            release_notes: req.release_notes.unwrap_or_default(),
+            dependencies: req
+                .dependencies
+                .unwrap_or_default()
+                .into_iter()
+                .map(|dependency| PublishDependency {
+                    upstream_asset_id: AssetId::from_uuid(dependency.upstream_asset_id),
+                    version: dependency.version,
+                })
+                .collect(),
+            suggested_type: req.suggested_type,
+        })
         .await
         .map_err(ApiError::from)?;
+
+    let mut affected_assets = Vec::new();
+    for downstream_id in state
+        .dependency_repo
+        .find_downstream(&asset_id)
+        .await
+        .map_err(ApiError::from)?
+    {
+        if let Some(asset) = state
+            .asset_repo
+            .find_by_id(&downstream_id)
+            .await
+            .map_err(ApiError::from)?
+        {
+            if asset.state().is_dirty() {
+                affected_assets.push(downstream_id.0);
+            }
+        }
+    }
 
     Ok((
         StatusCode::OK,
         Json(PublishResponse {
-            affected_assets: affected.into_iter().map(|id| id.0).collect(),
+            version: version.version_number,
+            affected_assets,
         }),
     ))
 }
@@ -712,45 +798,70 @@ pub async fn publish_asset(
 /// Per architecture: resolve dirty queue entries first, only mark Clean when no unresolved remain
 pub async fn resolve_dirty(
     State(state): State<AppState>,
-    ExtractAuth(_auth): ExtractAuth,
+    ExtractAuth(auth): ExtractAuth,
     Path(id): Path<Uuid>,
-    Json(_req): Json<ResolveRequest>,
+    Json(req): Json<ResolveRequest>,
 ) -> Result<StatusCode, ApiError> {
     let asset_id = AssetId::from_uuid(id);
+    let asset = state
+        .asset_repo
+        .find_by_id(&asset_id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+    check_asset_access(&auth.principal, &asset).map_err(|_| {
+        ApiError::Forbidden("User cannot resolve this asset".to_string())
+    })?;
 
-    // Check for unresolved dirty queue entries for this asset
     let unresolved = state
         .dirty_repo
         .find_unresolved_by_asset(&asset_id)
         .await
         .map_err(ApiError::from)?;
 
-    if !unresolved.is_empty() {
-        // Mark all unresolved entries as resolved
-        for entry in unresolved {
-            state
-                .dirty_repo
-                .resolve(&entry.id)
-                .await
-                .map_err(ApiError::from)?;
-        }
-    }
+    let asset_version = req
+        .resolved_version
+        .or_else(|| asset.current_version().cloned())
+        .unwrap_or_else(|| "0.0.0".to_string());
+    let resolutions = match req.resolutions {
+        Some(resolutions) => resolutions
+            .into_iter()
+            .map(|resolution| ManualCleanResolution {
+                upstream_asset_id: AssetId::from_uuid(resolution.upstream_asset_id),
+                from_version: resolution.from_version,
+                to_version: resolution.to_version,
+                review_result: resolution.review_result,
+                comment: resolution.comment,
+            })
+            .collect(),
+        None => unresolved
+            .iter()
+            .map(|entry| ManualCleanResolution {
+                upstream_asset_id: entry.upstream_asset_id,
+                from_version: entry.upstream_old_version.clone(),
+                to_version: entry.upstream_version.clone(),
+                review_result: "accepted".to_string(),
+                comment: None,
+            })
+            .collect(),
+    };
 
-    // Check again if there are any remaining unresolved entries
-    let remaining = state
-        .dirty_repo
-        .find_unresolved_by_asset(&asset_id)
+    let service = VersionService::new(
+        state.asset_repo.clone(),
+        state.dirty_repo.clone(),
+        state.version_repo.clone(),
+        state.dependency_repo.clone(),
+        state.dirty_log_repo.clone(),
+    );
+    service
+        .manual_clean(ManualCleanCommand {
+            asset_id,
+            asset_version,
+            reviewed_by: req.reviewed_by.unwrap_or(auth.principal.id),
+            resolutions,
+        })
         .await
         .map_err(ApiError::from)?;
-
-    // Only mark as Clean if no unresolved entries remain
-    if remaining.is_empty() {
-        state
-            .asset_repo
-            .update_state(&asset_id, AssetState::Clean)
-            .await
-            .map_err(ApiError::from)?;
-    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1013,8 +1124,10 @@ mod tests {
         AppState {
             asset_repo: Arc::new(adam_domain::InMemoryAssetRepository::new()),
             asset_type_repo: Arc::new(adam_domain::InMemoryAssetTypeRepository::new()),
-            dependency_repo: Arc::new(InMemoryDependencyRepository::new()),
+            dependency_repo: Arc::new(adam_domain::InMemoryDependencyRepository::new()),
             dirty_repo: Arc::new(adam_domain::InMemoryDirtyQueueRepository::new()),
+            version_repo: Arc::new(adam_domain::InMemoryAssetVersionRepository::new()),
+            dirty_log_repo: Arc::new(adam_domain::InMemoryDirtyResolutionLogRepository::new()),
         }
     }
 
@@ -1045,50 +1158,6 @@ mod tests {
             .join(",");
         let token = format!("{org_id}:{user_id}:{roles_str}:{projects}");
         ("authorization".to_string(), format!("Bearer {token}"))
-    }
-
-    use async_trait::async_trait;
-
-    /// Simple in-memory dependency repo for testing
-    struct InMemoryDependencyRepository {
-        data: std::sync::Mutex<
-            std::collections::HashMap<AssetId, Vec<AssetId>>, // asset_id -> downstream assets
-        >,
-    }
-
-    impl InMemoryDependencyRepository {
-        fn new() -> Self {
-            Self {
-                data: std::sync::Mutex::new(std::collections::HashMap::new()),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl DependencyRepository for InMemoryDependencyRepository {
-        async fn find_downstream(
-            &self,
-            _asset_id: &AssetId,
-        ) -> Result<Vec<AssetId>, RepositoryError> {
-            Ok(vec![])
-        }
-
-        async fn find_upstream(
-            &self,
-            _asset_id: &AssetId,
-        ) -> Result<Vec<AssetId>, RepositoryError> {
-            Ok(vec![])
-        }
-
-        async fn create_dependency(
-            &self,
-            source: &AssetId,
-            target: &AssetId,
-        ) -> Result<(), RepositoryError> {
-            let mut data = self.data.lock().unwrap();
-            data.entry(*target).or_default().push(*source);
-            Ok(())
-        }
     }
 
     #[tokio::test]
@@ -1411,11 +1480,29 @@ mod tests {
             .await
             .unwrap();
 
+        let upstream_asset_id = AssetId::new();
+        state
+            .dependency_repo
+            .create_dependency_record(&adam_domain::AssetDependencyRecord {
+                id: uuid::Uuid::new_v4(),
+                source_id: created_asset.id,
+                target_id: upstream_asset_id,
+                relationship: "depends_on".to_string(),
+                declared_version: "0.0.0".to_string(),
+                effective_version: "0.0.0".to_string(),
+                effective_updated_by: "publisher".to_string(),
+                effective_updated_at: chrono::Utc::now(),
+                effective_reason: adam_domain::EffectiveUpdateReason::Publish,
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
         // Create a dirty queue entry for this asset
         let entry = adam_domain::DirtyQueueEntry {
             id: uuid::Uuid::new_v4(),
             asset_id: created_asset.id,
-            upstream_asset_id: AssetId::new(),
+            upstream_asset_id,
             upstream_version: "v1.0.0".to_string(),
             upstream_old_version: "0.0.0".to_string(),
             impact_level: "medium".to_string(),

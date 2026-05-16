@@ -2,6 +2,7 @@
 
 use crate::asset::instance::AssetId;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Unique identifier for asset versions
@@ -153,6 +154,35 @@ pub trait AssetVersionRepository: Send + Sync {
         &self,
         asset_id: &AssetId,
     ) -> Result<Option<AssetVersion>, crate::RepositoryError>;
+}
+
+#[async_trait::async_trait]
+impl<T: AssetVersionRepository + ?Sized> AssetVersionRepository for Arc<T> {
+    async fn create(&self, version: &AssetVersion) -> Result<(), crate::RepositoryError> {
+        self.as_ref().create(version).await
+    }
+
+    async fn find_by_asset(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Vec<AssetVersion>, crate::RepositoryError> {
+        self.as_ref().find_by_asset(asset_id).await
+    }
+
+    async fn find_by_version(
+        &self,
+        asset_id: &AssetId,
+        version: &str,
+    ) -> Result<Option<AssetVersion>, crate::RepositoryError> {
+        self.as_ref().find_by_version(asset_id, version).await
+    }
+
+    async fn find_latest(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Option<AssetVersion>, crate::RepositoryError> {
+        self.as_ref().find_latest(asset_id).await
+    }
 }
 
 #[cfg(test)]

@@ -16,6 +16,8 @@ async fn main() -> anyhow::Result<()> {
     let asset_type_repo = Arc::new(adam_domain::InMemoryAssetTypeRepository::new());
     let dependency_repo = Arc::new(adam_domain::InMemoryDependencyRepository::new());
     let dirty_repo = Arc::new(adam_domain::InMemoryDirtyQueueRepository::new());
+    let version_repo = Arc::new(adam_domain::InMemoryAssetVersionRepository::new());
+    let dirty_log_repo = Arc::new(adam_domain::InMemoryDirtyResolutionLogRepository::new());
     let virtual_repo = Arc::new(adam_domain::InMemoryVirtualInstanceRepository::new());
 
     // Create a test principal (in production, this comes from auth token)
@@ -48,6 +50,8 @@ async fn main() -> anyhow::Result<()> {
         asset_type_repo: asset_type_repo.clone(),
         dependency_repo: dependency_repo.clone(),
         dirty_repo: dirty_repo.clone(),
+        version_repo: version_repo.clone(),
+        dirty_log_repo: dirty_log_repo.clone(),
     };
     let rest_app = rest::create_router(app_state);
 

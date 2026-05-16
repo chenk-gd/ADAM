@@ -8,6 +8,7 @@ use crate::asset::instance::{AssetId, AssetInstance};
 use crate::asset::state::AssetState;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Errors that can occur in repository operations
@@ -93,6 +94,59 @@ pub trait AssetRepository: Send + Sync {
     async fn delete(&self, id: &AssetId) -> Result<(), RepositoryError>;
 }
 
+#[async_trait]
+impl<T: AssetRepository + ?Sized> AssetRepository for Arc<T> {
+    async fn create(&self, cmd: &CreateAssetCommand) -> Result<AssetInstance, RepositoryError> {
+        self.as_ref().create(cmd).await
+    }
+
+    async fn find_by_id(&self, id: &AssetId) -> Result<Option<AssetInstance>, RepositoryError> {
+        self.as_ref().find_by_id(id).await
+    }
+
+    async fn update(
+        &self,
+        id: &AssetId,
+        cmd: &UpdateAssetCommand,
+    ) -> Result<AssetInstance, RepositoryError> {
+        self.as_ref().update(id, cmd).await
+    }
+
+    async fn update_state(&self, id: &AssetId, state: AssetState) -> Result<(), RepositoryError> {
+        self.as_ref().update_state(id, state).await
+    }
+
+    async fn update_publication(
+        &self,
+        id: &AssetId,
+        current_version: String,
+        publisher: String,
+        state: AssetState,
+    ) -> Result<(), RepositoryError> {
+        self.as_ref()
+            .update_publication(id, current_version, publisher, state)
+            .await
+    }
+
+    async fn find_by_project_id(
+        &self,
+        project_id: &crate::asset::instance::ProjectId,
+    ) -> Result<Vec<AssetInstance>, RepositoryError> {
+        self.as_ref().find_by_project_id(project_id).await
+    }
+
+    async fn find_by_organization_id(
+        &self,
+        org_id: &crate::asset::instance::OrganizationId,
+    ) -> Result<Vec<AssetInstance>, RepositoryError> {
+        self.as_ref().find_by_organization_id(org_id).await
+    }
+
+    async fn delete(&self, id: &AssetId) -> Result<(), RepositoryError> {
+        self.as_ref().delete(id).await
+    }
+}
+
 /// Reason why the current effective dependency baseline was updated
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffectiveUpdateReason {
@@ -163,6 +217,28 @@ pub trait DirtyQueueRepository: Send + Sync {
     async fn find_all_unresolved(&self) -> Result<Vec<DirtyQueueEntry>, RepositoryError>;
 }
 
+#[async_trait]
+impl<T: DirtyQueueRepository + ?Sized> DirtyQueueRepository for Arc<T> {
+    async fn upsert(&self, entry: &DirtyQueueEntry) -> Result<(), RepositoryError> {
+        self.as_ref().upsert(entry).await
+    }
+
+    async fn find_unresolved_by_asset(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Vec<DirtyQueueEntry>, RepositoryError> {
+        self.as_ref().find_unresolved_by_asset(asset_id).await
+    }
+
+    async fn resolve(&self, entry_id: &uuid::Uuid) -> Result<(), RepositoryError> {
+        self.as_ref().resolve(entry_id).await
+    }
+
+    async fn find_all_unresolved(&self) -> Result<Vec<DirtyQueueEntry>, RepositoryError> {
+        self.as_ref().find_all_unresolved().await
+    }
+}
+
 /// Repository trait for dependency operations
 #[async_trait]
 pub trait DependencyRepository: Send + Sync {
@@ -224,6 +300,59 @@ pub trait DependencyRepository: Send + Sync {
     }
 }
 
+#[async_trait]
+impl<T: DependencyRepository + ?Sized> DependencyRepository for Arc<T> {
+    async fn find_downstream(&self, asset_id: &AssetId) -> Result<Vec<AssetId>, RepositoryError> {
+        self.as_ref().find_downstream(asset_id).await
+    }
+
+    async fn find_upstream(&self, asset_id: &AssetId) -> Result<Vec<AssetId>, RepositoryError> {
+        self.as_ref().find_upstream(asset_id).await
+    }
+
+    async fn create_dependency(
+        &self,
+        source_id: &AssetId,
+        target_id: &AssetId,
+    ) -> Result<(), RepositoryError> {
+        self.as_ref().create_dependency(source_id, target_id).await
+    }
+
+    async fn create_dependency_record(
+        &self,
+        record: &AssetDependencyRecord,
+    ) -> Result<(), RepositoryError> {
+        self.as_ref().create_dependency_record(record).await
+    }
+
+    async fn find_downstream_dependencies(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Vec<AssetDependencyRecord>, RepositoryError> {
+        self.as_ref().find_downstream_dependencies(asset_id).await
+    }
+
+    async fn find_upstream_dependencies(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Vec<AssetDependencyRecord>, RepositoryError> {
+        self.as_ref().find_upstream_dependencies(asset_id).await
+    }
+
+    async fn update_effective_version(
+        &self,
+        source_id: &AssetId,
+        target_id: &AssetId,
+        effective_version: String,
+        updated_by: String,
+        reason: EffectiveUpdateReason,
+    ) -> Result<(), RepositoryError> {
+        self.as_ref()
+            .update_effective_version(source_id, target_id, effective_version, updated_by, reason)
+            .await
+    }
+}
+
 /// Dirty resolution audit log
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirtyResolutionLog {
@@ -251,6 +380,20 @@ pub trait DirtyResolutionLogRepository: Send + Sync {
         &self,
         asset_id: &AssetId,
     ) -> Result<Vec<DirtyResolutionLog>, RepositoryError>;
+}
+
+#[async_trait]
+impl<T: DirtyResolutionLogRepository + ?Sized> DirtyResolutionLogRepository for Arc<T> {
+    async fn insert(&self, log: &DirtyResolutionLog) -> Result<(), RepositoryError> {
+        self.as_ref().insert(log).await
+    }
+
+    async fn find_by_asset(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Vec<DirtyResolutionLog>, RepositoryError> {
+        self.as_ref().find_by_asset(asset_id).await
+    }
 }
 
 /// Repository trait for asset types
