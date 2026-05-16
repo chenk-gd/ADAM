@@ -956,13 +956,14 @@ impl AdamMcpServer {
         // Use VersionService to suggest version - import concrete types for turbofish
         use adam_domain::{
             InMemoryAssetRepository, InMemoryAssetVersionRepository, InMemoryDependencyRepository,
-            InMemoryDirtyQueueRepository,
+            InMemoryDirtyQueueRepository, InMemoryDirtyResolutionLogRepository,
         };
         let suggested_version = match VersionService::<
             InMemoryAssetRepository,
             InMemoryDirtyQueueRepository,
             InMemoryAssetVersionRepository,
             InMemoryDependencyRepository,
+            InMemoryDirtyResolutionLogRepository,
         >::suggest_version(current_version, change_type)
         {
             Ok(version) => version,

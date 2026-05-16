@@ -6,8 +6,8 @@ use adam_domain::asset::DependencySnapshot;
 use adam_domain::asset::version::SemVer;
 use adam_domain::{
     AssetDependencyRecord, AssetId, AssetRepository, AssetState, AssetVersion,
-    AssetVersionRepository, DependencyRepository, DirtyQueueRepository, EffectiveUpdateReason,
-    RepositoryError,
+    AssetVersionRepository, DependencyRepository, DirtyQueueRepository, DirtyResolutionLog,
+    DirtyResolutionLogRepository, EffectiveUpdateReason, RepositoryError,
 };
 
 use crate::services::state_propagator::StatePropagator;
@@ -50,33 +50,62 @@ pub struct PublishAssetCommand {
     pub suggested_type: Option<String>,
 }
 
+/// One upstream dependency review outcome during manual clean
+#[derive(Debug, Clone)]
+pub struct ManualCleanResolution {
+    pub upstream_asset_id: AssetId,
+    pub from_version: String,
+    pub to_version: String,
+    pub review_result: String,
+    pub comment: Option<String>,
+}
+
+/// Command for manually resolving dirty state
+#[derive(Debug, Clone)]
+pub struct ManualCleanCommand {
+    pub asset_id: AssetId,
+    pub asset_version: String,
+    pub reviewed_by: String,
+    pub resolutions: Vec<ManualCleanResolution>,
+}
+
 /// Service for asset versioning and state management
 pub struct VersionService<
     A: AssetRepository,
     D: DirtyQueueRepository,
     V: AssetVersionRepository,
     DEP: DependencyRepository,
+    L: DirtyResolutionLogRepository,
 > {
     asset_repo: A,
     dirty_repo: D,
     version_repo: V,
     dependency_repo: DEP,
+    dirty_log_repo: L,
 }
 
 impl<
     A: AssetRepository,
-    D: DirtyQueueRepository,
-    V: AssetVersionRepository,
-    DEP: DependencyRepository,
-> VersionService<A, D, V, DEP>
+        D: DirtyQueueRepository,
+        V: AssetVersionRepository,
+        DEP: DependencyRepository,
+        L: DirtyResolutionLogRepository,
+    > VersionService<A, D, V, DEP, L>
 {
     /// Create a new VersionService
-    pub fn new(asset_repo: A, dirty_repo: D, version_repo: V, dependency_repo: DEP) -> Self {
+    pub fn new(
+        asset_repo: A,
+        dirty_repo: D,
+        version_repo: V,
+        dependency_repo: DEP,
+        dirty_log_repo: L,
+    ) -> Self {
         Self {
             asset_repo,
             dirty_repo,
             version_repo,
             dependency_repo,
+            dirty_log_repo,
         }
     }
 
@@ -206,20 +235,19 @@ impl<
     /// to Clean state if no unresolved entries remain.
     pub async fn manual_clean(
         &self,
-        asset_id: &AssetId,
-        resolved_version: &str,
+        cmd: ManualCleanCommand,
     ) -> Result<(), VersionServiceError> {
-        // Validate version format
-        let _version = SemVer::parse(resolved_version)
-            .map_err(|e| VersionServiceError::InvalidVersion(format!("{resolved_version}: {e}")))?;
+        SemVer::parse(&cmd.asset_version).map_err(|e| {
+            VersionServiceError::InvalidVersion(format!("{}: {e}", cmd.asset_version))
+        })?;
 
         // Get asset
         let asset = self
             .asset_repo
-            .find_by_id(asset_id)
+            .find_by_id(&cmd.asset_id)
             .await
             .map_err(VersionServiceError::from)?
-            .ok_or_else(|| VersionServiceError::NotFound(format!("{asset_id:?}")))?;
+            .ok_or_else(|| VersionServiceError::NotFound(format!("{:?}", cmd.asset_id)))?;
 
         // Check asset is in Dirty state
         if !asset.state().is_dirty() {
@@ -228,14 +256,56 @@ impl<
             ));
         }
 
-        // Resolve all dirty queue entries for this asset
         let unresolved = self
             .dirty_repo
-            .find_unresolved_by_asset(asset_id)
+            .find_unresolved_by_asset(&cmd.asset_id)
             .await
             .map_err(VersionServiceError::from)?;
 
-        for entry in unresolved {
+        for resolution in &cmd.resolutions {
+            let entry = unresolved
+                .iter()
+                .find(|entry| {
+                    entry.upstream_asset_id == resolution.upstream_asset_id
+                        && entry.upstream_old_version == resolution.from_version
+                        && entry.upstream_version == resolution.to_version
+                })
+                .ok_or_else(|| {
+                    VersionServiceError::InvalidState(format!(
+                        "No unresolved dirty entry for upstream {:?} from {} to {}",
+                        resolution.upstream_asset_id, resolution.from_version, resolution.to_version
+                    ))
+                })?;
+
+            self.dependency_repo
+                .update_effective_version(
+                    &cmd.asset_id,
+                    &resolution.upstream_asset_id,
+                    resolution.to_version.clone(),
+                    cmd.reviewed_by.clone(),
+                    EffectiveUpdateReason::ManualClean,
+                )
+                .await
+                .map_err(VersionServiceError::from)?;
+
+            let reviewed_at = chrono::Utc::now();
+            self.dirty_log_repo
+                .insert(&DirtyResolutionLog {
+                    id: uuid::Uuid::new_v4(),
+                    asset_id: cmd.asset_id,
+                    asset_version: cmd.asset_version.clone(),
+                    upstream_asset_id: resolution.upstream_asset_id,
+                    from_version: resolution.from_version.clone(),
+                    to_version: resolution.to_version.clone(),
+                    action: "manual_clean".to_string(),
+                    review_result: resolution.review_result.clone(),
+                    comment: resolution.comment.clone(),
+                    reviewed_by: cmd.reviewed_by.clone(),
+                    reviewed_at,
+                })
+                .await
+                .map_err(VersionServiceError::from)?;
+
             self.dirty_repo
                 .resolve(&entry.id)
                 .await
@@ -245,14 +315,14 @@ impl<
         // Check if any unresolved entries remain
         let remaining = self
             .dirty_repo
-            .find_unresolved_by_asset(asset_id)
+            .find_unresolved_by_asset(&cmd.asset_id)
             .await
             .map_err(VersionServiceError::from)?;
 
         // Only mark as Clean if no unresolved entries remain
         if remaining.is_empty() {
             self.asset_repo
-                .update_state(asset_id, AssetState::Clean)
+                .update_state(&cmd.asset_id, AssetState::Clean)
                 .await
                 .map_err(VersionServiceError::from)?;
         }
@@ -288,7 +358,8 @@ mod tests {
     use adam_domain::{
         AssetId, AssetLevel, AssetState, AssetTypeId, CreateAssetCommand, DirtyQueueEntry,
         InMemoryAssetRepository, InMemoryAssetVersionRepository, InMemoryDependencyRepository,
-        InMemoryDirtyQueueRepository, OrganizationId, ProjectId,
+        InMemoryDirtyQueueRepository, InMemoryDirtyResolutionLogRepository, OrganizationId,
+        ProjectId,
     };
 
     type TestVersionService = VersionService<
@@ -296,6 +367,7 @@ mod tests {
         InMemoryDirtyQueueRepository,
         InMemoryAssetVersionRepository,
         InMemoryDependencyRepository,
+        InMemoryDirtyResolutionLogRepository,
     >;
 
     fn publish_command(asset_id: AssetId, version: &str, publisher: &str) -> PublishAssetCommand {
@@ -306,6 +378,20 @@ mod tests {
             release_notes: String::new(),
             dependencies: Vec::new(),
             suggested_type: None,
+        }
+    }
+
+    fn manual_clean_command(
+        asset_id: AssetId,
+        asset_version: &str,
+        reviewed_by: &str,
+        resolutions: Vec<ManualCleanResolution>,
+    ) -> ManualCleanCommand {
+        ManualCleanCommand {
+            asset_id,
+            asset_version: asset_version.to_string(),
+            reviewed_by: reviewed_by.to_string(),
+            resolutions,
         }
     }
 
@@ -352,6 +438,7 @@ mod tests {
             dirty_repo,
             InMemoryAssetVersionRepository::new(),
             InMemoryDependencyRepository::new(),
+            InMemoryDirtyResolutionLogRepository::new(),
         );
 
         let version = service
@@ -421,6 +508,7 @@ mod tests {
             dirty_repo,
             InMemoryAssetVersionRepository::new(),
             InMemoryDependencyRepository::new(),
+            InMemoryDirtyResolutionLogRepository::new(),
         );
 
         let version = service
@@ -506,6 +594,7 @@ mod tests {
             InMemoryDirtyQueueRepository::new(),
             InMemoryAssetVersionRepository::new(),
             dependency_repo,
+            InMemoryDirtyResolutionLogRepository::new(),
         );
 
         service
@@ -554,6 +643,7 @@ mod tests {
             dirty_repo,
             InMemoryAssetVersionRepository::new(),
             InMemoryDependencyRepository::new(),
+            InMemoryDirtyResolutionLogRepository::new(),
         );
 
         // Archive the asset
@@ -622,11 +712,29 @@ mod tests {
             .await
             .unwrap();
 
+        let upstream_id = AssetId::new();
+        let dependency_repo = InMemoryDependencyRepository::new();
+        dependency_repo
+            .create_dependency_record(&AssetDependencyRecord {
+                id: uuid::Uuid::new_v4(),
+                source_id: asset.id,
+                target_id: upstream_id,
+                relationship: "depends_on".to_string(),
+                declared_version: "0.0.0".to_string(),
+                effective_version: "0.0.0".to_string(),
+                effective_updated_by: "publisher".to_string(),
+                effective_updated_at: chrono::Utc::now(),
+                effective_reason: EffectiveUpdateReason::Publish,
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
         // Add a dirty queue entry
         let entry = DirtyQueueEntry {
             id: uuid::Uuid::new_v4(),
             asset_id: asset.id,
-            upstream_asset_id: AssetId::new(),
+            upstream_asset_id: upstream_id,
             upstream_version: "1.0.0".to_string(),
             upstream_old_version: "0.0.0".to_string(),
             impact_level: "medium".to_string(),
@@ -640,11 +748,26 @@ mod tests {
             asset_repo,
             dirty_repo,
             InMemoryAssetVersionRepository::new(),
-            InMemoryDependencyRepository::new(),
+            dependency_repo,
+            InMemoryDirtyResolutionLogRepository::new(),
         );
 
         // Resolve dirty
-        service.manual_clean(&asset.id, "1.0.1").await.unwrap();
+        service
+            .manual_clean(manual_clean_command(
+                asset.id,
+                "1.0.1",
+                "reviewer",
+                vec![ManualCleanResolution {
+                    upstream_asset_id: upstream_id,
+                    from_version: "0.0.0".to_string(),
+                    to_version: "1.0.0".to_string(),
+                    review_result: "no_impact".to_string(),
+                    comment: Some("仅文档更新".to_string()),
+                }],
+            ))
+            .await
+            .unwrap();
 
         // Verify asset is now clean
         let updated = service
@@ -654,6 +777,244 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(updated.state(), AssetState::Clean);
+
+        let records = service
+            .dependency_repo
+            .find_upstream_dependencies(&asset.id)
+            .await
+            .unwrap();
+        assert_eq!(records[0].effective_version, "1.0.0");
+        assert_eq!(records[0].effective_updated_by, "reviewer");
+        assert_eq!(
+            records[0].effective_reason,
+            EffectiveUpdateReason::ManualClean
+        );
+
+        let logs = service
+            .dirty_log_repo
+            .find_by_asset(&asset.id)
+            .await
+            .unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].upstream_asset_id, upstream_id);
+        assert_eq!(logs[0].from_version, "0.0.0");
+        assert_eq!(logs[0].to_version, "1.0.0");
+        assert_eq!(logs[0].review_result, "no_impact");
+    }
+
+    #[tokio::test]
+    async fn manual_clean_partial_resolution_keeps_asset_dirty() {
+        let org_id = OrganizationId::new();
+        let project_id = ProjectId::new();
+        let type_id = AssetTypeId::new();
+
+        let asset_repo = InMemoryAssetRepository::new();
+        let dirty_repo = InMemoryDirtyQueueRepository::new();
+        let dependency_repo = InMemoryDependencyRepository::new();
+
+        let asset = asset_repo
+            .create(&create_asset_command(
+                "Test Asset",
+                org_id,
+                project_id,
+                type_id,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        asset_repo
+            .update_state(&asset.id, AssetState::Dirty)
+            .await
+            .unwrap();
+
+        let upstream_a = AssetId::new();
+        let upstream_b = AssetId::new();
+        for upstream_id in [upstream_a, upstream_b] {
+            dependency_repo
+                .create_dependency_record(&AssetDependencyRecord {
+                    id: uuid::Uuid::new_v4(),
+                    source_id: asset.id,
+                    target_id: upstream_id,
+                    relationship: "depends_on".to_string(),
+                    declared_version: "1.0.0".to_string(),
+                    effective_version: "1.0.0".to_string(),
+                    effective_updated_by: "publisher".to_string(),
+                    effective_updated_at: chrono::Utc::now(),
+                    effective_reason: EffectiveUpdateReason::Publish,
+                    created_at: chrono::Utc::now(),
+                })
+                .await
+                .unwrap();
+            dirty_repo
+                .upsert(&DirtyQueueEntry {
+                    id: uuid::Uuid::new_v4(),
+                    asset_id: asset.id,
+                    upstream_asset_id: upstream_id,
+                    upstream_version: "1.1.0".to_string(),
+                    upstream_old_version: "1.0.0".to_string(),
+                    impact_level: "medium".to_string(),
+                    since: chrono::Utc::now(),
+                    created_at: chrono::Utc::now(),
+                    resolved_at: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let service = VersionService::new(
+            asset_repo,
+            dirty_repo,
+            InMemoryAssetVersionRepository::new(),
+            dependency_repo,
+            InMemoryDirtyResolutionLogRepository::new(),
+        );
+
+        service
+            .manual_clean(manual_clean_command(
+                asset.id,
+                "1.0.1",
+                "reviewer",
+                vec![ManualCleanResolution {
+                    upstream_asset_id: upstream_a,
+                    from_version: "1.0.0".to_string(),
+                    to_version: "1.1.0".to_string(),
+                    review_result: "accepted".to_string(),
+                    comment: None,
+                }],
+            ))
+            .await
+            .unwrap();
+
+        let updated = service
+            .asset_repo
+            .find_by_id(&asset.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.state(), AssetState::Dirty);
+
+        let remaining = service
+            .dirty_repo
+            .find_unresolved_by_asset(&asset.id)
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].upstream_asset_id, upstream_b);
+
+        let logs = service
+            .dirty_log_repo
+            .find_by_asset(&asset.id)
+            .await
+            .unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].upstream_asset_id, upstream_a);
+    }
+
+    #[tokio::test]
+    async fn manual_clean_does_not_dirty_downstream_assets() {
+        let org_id = OrganizationId::new();
+        let project_id = ProjectId::new();
+        let type_id = AssetTypeId::new();
+
+        let asset_repo = InMemoryAssetRepository::new();
+        let dirty_repo = InMemoryDirtyQueueRepository::new();
+        let dependency_repo = InMemoryDependencyRepository::new();
+
+        let asset = asset_repo
+            .create(&create_asset_command(
+                "Current",
+                org_id,
+                project_id,
+                type_id,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        let downstream = asset_repo
+            .create(&create_asset_command(
+                "Downstream",
+                org_id,
+                project_id,
+                type_id,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        asset_repo
+            .update_state(&asset.id, AssetState::Dirty)
+            .await
+            .unwrap();
+
+        let upstream_id = AssetId::new();
+        for (source_id, target_id) in [(asset.id, upstream_id), (downstream.id, asset.id)] {
+            dependency_repo
+                .create_dependency_record(&AssetDependencyRecord {
+                    id: uuid::Uuid::new_v4(),
+                    source_id,
+                    target_id,
+                    relationship: "depends_on".to_string(),
+                    declared_version: "1.0.0".to_string(),
+                    effective_version: "1.0.0".to_string(),
+                    effective_updated_by: "publisher".to_string(),
+                    effective_updated_at: chrono::Utc::now(),
+                    effective_reason: EffectiveUpdateReason::Publish,
+                    created_at: chrono::Utc::now(),
+                })
+                .await
+                .unwrap();
+        }
+        dirty_repo
+            .upsert(&DirtyQueueEntry {
+                id: uuid::Uuid::new_v4(),
+                asset_id: asset.id,
+                upstream_asset_id: upstream_id,
+                upstream_version: "1.1.0".to_string(),
+                upstream_old_version: "1.0.0".to_string(),
+                impact_level: "medium".to_string(),
+                since: chrono::Utc::now(),
+                created_at: chrono::Utc::now(),
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+
+        let service = VersionService::new(
+            asset_repo,
+            dirty_repo,
+            InMemoryAssetVersionRepository::new(),
+            dependency_repo,
+            InMemoryDirtyResolutionLogRepository::new(),
+        );
+
+        service
+            .manual_clean(manual_clean_command(
+                asset.id,
+                "1.0.1",
+                "reviewer",
+                vec![ManualCleanResolution {
+                    upstream_asset_id: upstream_id,
+                    from_version: "1.0.0".to_string(),
+                    to_version: "1.1.0".to_string(),
+                    review_result: "accepted".to_string(),
+                    comment: None,
+                }],
+            ))
+            .await
+            .unwrap();
+
+        let downstream_asset = service
+            .asset_repo
+            .find_by_id(&downstream.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(downstream_asset.state(), AssetState::Clean);
+        assert!(service
+            .dirty_repo
+            .find_unresolved_by_asset(&downstream.id)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -679,10 +1040,13 @@ mod tests {
             dirty_repo,
             InMemoryAssetVersionRepository::new(),
             InMemoryDependencyRepository::new(),
+            InMemoryDirtyResolutionLogRepository::new(),
         );
 
         // Try to clean a Clean asset
-        let result = service.manual_clean(&asset.id, "1.0.1").await;
+        let result = service
+            .manual_clean(manual_clean_command(asset.id, "1.0.1", "reviewer", vec![]))
+            .await;
 
         assert!(result.is_err());
         assert!(matches!(
@@ -714,6 +1078,7 @@ mod tests {
             dirty_repo,
             InMemoryAssetVersionRepository::new(),
             InMemoryDependencyRepository::new(),
+            InMemoryDirtyResolutionLogRepository::new(),
         );
 
         // Initially no review needed
