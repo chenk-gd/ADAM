@@ -2,11 +2,15 @@
 //!
 //! Replaces hardcoded stubs in MCP handlers with actual business logic.
 
+use adam_domain::asset::DependencySnapshot;
 use adam_domain::asset::version::SemVer;
 use adam_domain::{
-    AssetId, AssetRepository, AssetState, AssetVersion, AssetVersionRepository,
-    DirtyQueueRepository, RepositoryError,
+    AssetDependencyRecord, AssetId, AssetRepository, AssetState, AssetVersion,
+    AssetVersionRepository, DependencyRepository, DirtyQueueRepository, EffectiveUpdateReason,
+    RepositoryError,
 };
+
+use crate::services::state_propagator::StatePropagator;
 
 /// Errors that can occur in VersionService
 #[derive(Debug, thiserror::Error)]
@@ -28,22 +32,51 @@ pub enum VersionServiceError {
     CycleDetected,
 }
 
+/// Dependency declared during publish
+#[derive(Debug, Clone)]
+pub struct PublishDependency {
+    pub upstream_asset_id: AssetId,
+    pub version: String,
+}
+
+/// Command for publishing an asset version
+#[derive(Debug, Clone)]
+pub struct PublishAssetCommand {
+    pub asset_id: AssetId,
+    pub version: String,
+    pub publisher: String,
+    pub release_notes: String,
+    pub dependencies: Vec<PublishDependency>,
+    pub suggested_type: Option<String>,
+}
+
 /// Service for asset versioning and state management
-pub struct VersionService<A: AssetRepository, D: DirtyQueueRepository, V: AssetVersionRepository> {
+pub struct VersionService<
+    A: AssetRepository,
+    D: DirtyQueueRepository,
+    V: AssetVersionRepository,
+    DEP: DependencyRepository,
+> {
     asset_repo: A,
     dirty_repo: D,
     version_repo: V,
+    dependency_repo: DEP,
 }
 
-impl<A: AssetRepository, D: DirtyQueueRepository, V: AssetVersionRepository>
-    VersionService<A, D, V>
+impl<
+    A: AssetRepository,
+    D: DirtyQueueRepository,
+    V: AssetVersionRepository,
+    DEP: DependencyRepository,
+> VersionService<A, D, V, DEP>
 {
     /// Create a new VersionService
-    pub fn new(asset_repo: A, dirty_repo: D, version_repo: V) -> Self {
+    pub fn new(asset_repo: A, dirty_repo: D, version_repo: V, dependency_repo: DEP) -> Self {
         Self {
             asset_repo,
             dirty_repo,
             version_repo,
+            dependency_repo,
         }
     }
 
@@ -53,21 +86,19 @@ impl<A: AssetRepository, D: DirtyQueueRepository, V: AssetVersionRepository>
     /// and updates the asset's current_version and publisher.
     pub async fn publish(
         &self,
-        asset_id: &AssetId,
-        version_str: &str,
-        publisher: &str,
+        cmd: PublishAssetCommand,
     ) -> Result<AssetVersion, VersionServiceError> {
         // Validate version format
-        let version = SemVer::parse(version_str)
-            .map_err(|e| VersionServiceError::InvalidVersion(format!("{version_str}: {e}")))?;
+        let version = SemVer::parse(&cmd.version)
+            .map_err(|e| VersionServiceError::InvalidVersion(format!("{}: {e}", cmd.version)))?;
 
         // Get asset
         let asset = self
             .asset_repo
-            .find_by_id(asset_id)
+            .find_by_id(&cmd.asset_id)
             .await
             .map_err(VersionServiceError::from)?
-            .ok_or_else(|| VersionServiceError::NotFound(format!("{asset_id:?}")))?;
+            .ok_or_else(|| VersionServiceError::NotFound(format!("{:?}", cmd.asset_id)))?;
 
         // Check asset is not archived
         if asset.state().is_archived() {
@@ -76,15 +107,24 @@ impl<A: AssetRepository, D: DirtyQueueRepository, V: AssetVersionRepository>
             ));
         }
 
-        // Create asset version
-        let asset_version = AssetVersion::new(
-            *asset_id,
+        let dependency_snapshots: Vec<DependencySnapshot> = cmd
+            .dependencies
+            .iter()
+            .map(|dependency| DependencySnapshot {
+                upstream_asset_id: dependency.upstream_asset_id,
+                upstream_version: dependency.version.clone(),
+            })
+            .collect();
+
+        let mut asset_version = AssetVersion::new(
+            cmd.asset_id,
             version.to_string(),
-            serde_json::json!({}),
-            vec![], // dependencies will be stored separately
-            "",     // release notes
-            publisher.to_string(),
+            asset.metadata.clone(),
+            dependency_snapshots,
+            cmd.release_notes.clone(),
+            cmd.publisher.clone(),
         );
+        asset_version.suggested_type = cmd.suggested_type.clone();
 
         // Persist the asset version
         self.version_repo
@@ -92,9 +132,48 @@ impl<A: AssetRepository, D: DirtyQueueRepository, V: AssetVersionRepository>
             .await
             .map_err(VersionServiceError::from)?;
 
-        // Update asset's current_version and publisher
-        // Note: AssetRepository::update_version method would be needed for full implementation
-        // For now, we persist the version and return it
+        for dependency in &cmd.dependencies {
+            let now = chrono::Utc::now();
+            self.dependency_repo
+                .create_dependency_record(&AssetDependencyRecord {
+                    id: uuid::Uuid::new_v4(),
+                    source_id: cmd.asset_id,
+                    target_id: dependency.upstream_asset_id,
+                    relationship: "depends_on".to_string(),
+                    declared_version: dependency.version.clone(),
+                    effective_version: dependency.version.clone(),
+                    effective_updated_by: cmd.publisher.clone(),
+                    effective_updated_at: now,
+                    effective_reason: EffectiveUpdateReason::Publish,
+                    created_at: now,
+                })
+                .await
+                .map_err(VersionServiceError::from)?;
+        }
+
+        self.asset_repo
+            .update_publication(
+                &cmd.asset_id,
+                asset_version.version_number.clone(),
+                cmd.publisher.clone(),
+                AssetState::Clean,
+            )
+            .await
+            .map_err(VersionServiceError::from)?;
+
+        let propagator = StatePropagator::new();
+        propagator
+            .on_asset_published(
+                &cmd.asset_id,
+                &asset_version.version_number,
+                &self.asset_repo,
+                &self.dependency_repo,
+                &self.dirty_repo,
+            )
+            .await
+            .map_err(|e| {
+                VersionServiceError::Repository(RepositoryError::DatabaseError(e.to_string()))
+            })?;
 
         Ok(asset_version)
     }
@@ -208,12 +287,50 @@ mod tests {
     use super::*;
     use adam_domain::{
         AssetId, AssetLevel, AssetState, AssetTypeId, CreateAssetCommand, DirtyQueueEntry,
-        InMemoryAssetRepository, InMemoryAssetVersionRepository, InMemoryDirtyQueueRepository,
-        OrganizationId, ProjectId,
+        InMemoryAssetRepository, InMemoryAssetVersionRepository, InMemoryDependencyRepository,
+        InMemoryDirtyQueueRepository, OrganizationId, ProjectId,
     };
 
+    type TestVersionService = VersionService<
+        InMemoryAssetRepository,
+        InMemoryDirtyQueueRepository,
+        InMemoryAssetVersionRepository,
+        InMemoryDependencyRepository,
+    >;
+
+    fn publish_command(asset_id: AssetId, version: &str, publisher: &str) -> PublishAssetCommand {
+        PublishAssetCommand {
+            asset_id,
+            version: version.to_string(),
+            publisher: publisher.to_string(),
+            release_notes: String::new(),
+            dependencies: Vec::new(),
+            suggested_type: None,
+        }
+    }
+
+    fn create_asset_command(
+        name: &str,
+        org_id: OrganizationId,
+        project_id: ProjectId,
+        type_id: AssetTypeId,
+        metadata: serde_json::Value,
+    ) -> CreateAssetCommand {
+        CreateAssetCommand {
+            name: name.to_string(),
+            asset_type_id: type_id,
+            project_id: Some(project_id),
+            organization_id: org_id,
+            level: AssetLevel::Project,
+            external_ref: format!("https://example.com/asset/{name}"),
+            source: "manual".to_string(),
+            metadata,
+            idempotency_key: None,
+        }
+    }
+
     #[tokio::test]
-    async fn publish_creates_version() {
+    async fn publish_creates_version_and_updates_asset() {
         let org_id = OrganizationId::new();
         let project_id = ProjectId::new();
         let type_id = AssetTypeId::new();
@@ -221,34 +338,197 @@ mod tests {
         let asset_repo = InMemoryAssetRepository::new();
         let dirty_repo = InMemoryDirtyQueueRepository::new();
 
-        // Create asset first
-        let cmd = CreateAssetCommand {
-            name: "Test Asset".to_string(),
-            asset_type_id: type_id,
-            project_id: Some(project_id),
-            organization_id: org_id,
-            level: AssetLevel::Project,
-            external_ref: "https://example.com/asset/1".to_string(),
-            source: "manual".to_string(),
-            metadata: serde_json::json!({}),
-            idempotency_key: None,
-        };
+        let cmd = create_asset_command(
+            "Test Asset",
+            org_id,
+            project_id,
+            type_id,
+            serde_json::json!({"domain": "requirements"}),
+        );
         let asset = asset_repo.create(&cmd).await.unwrap();
 
         let service = VersionService::new(
             asset_repo,
             dirty_repo,
             InMemoryAssetVersionRepository::new(),
+            InMemoryDependencyRepository::new(),
         );
 
-        // Publish new version
         let version = service
-            .publish(&asset.id, "1.0.0", "test_user")
+            .publish(PublishAssetCommand {
+                asset_id: asset.id,
+                version: "v1.0.0".to_string(),
+                publisher: "test_user".to_string(),
+                release_notes: "initial release".to_string(),
+                dependencies: Vec::new(),
+                suggested_type: Some("minor".to_string()),
+            })
             .await
             .unwrap();
 
         assert_eq!(version.version_number, "1.0.0");
         assert_eq!(version.released_by, "test_user");
+        assert_eq!(version.release_notes, "initial release");
+        assert_eq!(version.suggested_type, Some("minor".to_string()));
+        assert_eq!(
+            version.metadata,
+            serde_json::json!({"domain": "requirements"})
+        );
+
+        let updated = service
+            .asset_repo
+            .find_by_id(&asset.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.current_version().map(String::as_str), Some("1.0.0"));
+        assert_eq!(updated.publisher().map(String::as_str), Some("test_user"));
+        assert_eq!(updated.state(), AssetState::Clean);
+    }
+
+    #[tokio::test]
+    async fn publish_persists_dependency_snapshot_and_effective_baseline() {
+        let org_id = OrganizationId::new();
+        let project_id = ProjectId::new();
+        let type_id = AssetTypeId::new();
+
+        let asset_repo = InMemoryAssetRepository::new();
+        let dirty_repo = InMemoryDirtyQueueRepository::new();
+
+        let upstream = asset_repo
+            .create(&create_asset_command(
+                "Upstream",
+                org_id,
+                project_id,
+                type_id,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        let downstream = asset_repo
+            .create(&create_asset_command(
+                "Downstream",
+                org_id,
+                project_id,
+                type_id,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+
+        let service = VersionService::new(
+            asset_repo,
+            dirty_repo,
+            InMemoryAssetVersionRepository::new(),
+            InMemoryDependencyRepository::new(),
+        );
+
+        let version = service
+            .publish(PublishAssetCommand {
+                asset_id: downstream.id,
+                version: "1.2.0".to_string(),
+                publisher: "publisher".to_string(),
+                release_notes: "link dependency".to_string(),
+                dependencies: vec![PublishDependency {
+                    upstream_asset_id: upstream.id,
+                    version: "1.0.0".to_string(),
+                }],
+                suggested_type: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(version.dependencies.len(), 1);
+        assert_eq!(version.dependencies[0].upstream_asset_id, upstream.id);
+        assert_eq!(version.dependencies[0].upstream_version, "1.0.0");
+
+        let records = service
+            .dependency_repo
+            .find_upstream_dependencies(&downstream.id)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].source_id, downstream.id);
+        assert_eq!(records[0].target_id, upstream.id);
+        assert_eq!(records[0].declared_version, "1.0.0");
+        assert_eq!(records[0].effective_version, "1.0.0");
+        assert_eq!(records[0].effective_updated_by, "publisher");
+        assert_eq!(records[0].effective_reason, EffectiveUpdateReason::Publish);
+    }
+
+    #[tokio::test]
+    async fn publish_marks_direct_downstream_assets_dirty() {
+        let org_id = OrganizationId::new();
+        let project_id = ProjectId::new();
+        let type_id = AssetTypeId::new();
+
+        let asset_repo = InMemoryAssetRepository::new();
+        let upstream = asset_repo
+            .create(&create_asset_command(
+                "Upstream",
+                org_id,
+                project_id,
+                type_id,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        let downstream = asset_repo
+            .create(&create_asset_command(
+                "Downstream",
+                org_id,
+                project_id,
+                type_id,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+
+        let dependency_repo = InMemoryDependencyRepository::new();
+        dependency_repo
+            .create_dependency_record(&AssetDependencyRecord {
+                id: uuid::Uuid::new_v4(),
+                source_id: downstream.id,
+                target_id: upstream.id,
+                relationship: "depends_on".to_string(),
+                declared_version: "1.0.0".to_string(),
+                effective_version: "1.0.0".to_string(),
+                effective_updated_by: "publisher".to_string(),
+                effective_updated_at: chrono::Utc::now(),
+                effective_reason: EffectiveUpdateReason::Publish,
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let service = VersionService::new(
+            asset_repo,
+            InMemoryDirtyQueueRepository::new(),
+            InMemoryAssetVersionRepository::new(),
+            dependency_repo,
+        );
+
+        service
+            .publish(publish_command(upstream.id, "1.1.0", "publisher"))
+            .await
+            .unwrap();
+
+        let downstream_asset = service
+            .asset_repo
+            .find_by_id(&downstream.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(downstream_asset.state(), AssetState::Dirty);
+
+        let dirty_entries = service
+            .dirty_repo
+            .find_unresolved_by_asset(&downstream.id)
+            .await
+            .unwrap();
+        assert_eq!(dirty_entries.len(), 1);
+        assert_eq!(dirty_entries[0].upstream_asset_id, upstream.id);
+        assert_eq!(dirty_entries[0].upstream_version, "1.1.0");
     }
 
     #[tokio::test]
@@ -260,24 +540,20 @@ mod tests {
         let asset_repo = InMemoryAssetRepository::new();
         let dirty_repo = InMemoryDirtyQueueRepository::new();
 
-        // Create asset
-        let cmd = CreateAssetCommand {
-            name: "Test Asset".to_string(),
-            asset_type_id: type_id,
-            project_id: Some(project_id),
-            organization_id: org_id,
-            level: AssetLevel::Project,
-            external_ref: "https://example.com/asset/1".to_string(),
-            source: "manual".to_string(),
-            metadata: serde_json::json!({}),
-            idempotency_key: None,
-        };
+        let cmd = create_asset_command(
+            "Test Asset",
+            org_id,
+            project_id,
+            type_id,
+            serde_json::json!({}),
+        );
         let asset = asset_repo.create(&cmd).await.unwrap();
 
         let service = VersionService::new(
             asset_repo,
             dirty_repo,
             InMemoryAssetVersionRepository::new(),
+            InMemoryDependencyRepository::new(),
         );
 
         // Archive the asset
@@ -287,8 +563,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Try to publish
-        let result = service.publish(&asset.id, "1.0.0", "test_user").await;
+        let result = service
+            .publish(publish_command(asset.id, "1.0.0", "test_user"))
+            .await;
 
         assert!(result.is_err());
         assert!(matches!(
@@ -299,44 +576,25 @@ mod tests {
 
     #[test]
     fn suggest_version_major() {
-        let next = VersionService::<
-            InMemoryAssetRepository,
-            InMemoryDirtyQueueRepository,
-            InMemoryAssetVersionRepository,
-        >::suggest_version("1.2.3", ChangeType::Breaking)
-        .unwrap();
+        let next = TestVersionService::suggest_version("1.2.3", ChangeType::Breaking).unwrap();
         assert_eq!(next, "2.0.0");
     }
 
     #[test]
     fn suggest_version_minor() {
-        let next = VersionService::<
-            InMemoryAssetRepository,
-            InMemoryDirtyQueueRepository,
-            InMemoryAssetVersionRepository,
-        >::suggest_version("1.2.3", ChangeType::Feature)
-        .unwrap();
+        let next = TestVersionService::suggest_version("1.2.3", ChangeType::Feature).unwrap();
         assert_eq!(next, "1.3.0");
     }
 
     #[test]
     fn suggest_version_patch() {
-        let next = VersionService::<
-            InMemoryAssetRepository,
-            InMemoryDirtyQueueRepository,
-            InMemoryAssetVersionRepository,
-        >::suggest_version("1.2.3", ChangeType::Bugfix)
-        .unwrap();
+        let next = TestVersionService::suggest_version("1.2.3", ChangeType::Bugfix).unwrap();
         assert_eq!(next, "1.2.4");
     }
 
     #[test]
     fn suggest_version_invalid_input() {
-        let result = VersionService::<
-            InMemoryAssetRepository,
-            InMemoryDirtyQueueRepository,
-            InMemoryAssetVersionRepository,
-        >::suggest_version("not-a-version", ChangeType::Bugfix);
+        let result = TestVersionService::suggest_version("not-a-version", ChangeType::Bugfix);
         assert!(result.is_err());
     }
 
@@ -349,18 +607,13 @@ mod tests {
         let asset_repo = InMemoryAssetRepository::new();
         let dirty_repo = InMemoryDirtyQueueRepository::new();
 
-        // Create asset
-        let cmd = CreateAssetCommand {
-            name: "Test Asset".to_string(),
-            asset_type_id: type_id,
-            project_id: Some(project_id),
-            organization_id: org_id,
-            level: AssetLevel::Project,
-            external_ref: "https://example.com/asset/1".to_string(),
-            source: "manual".to_string(),
-            metadata: serde_json::json!({}),
-            idempotency_key: None,
-        };
+        let cmd = create_asset_command(
+            "Test Asset",
+            org_id,
+            project_id,
+            type_id,
+            serde_json::json!({}),
+        );
         let asset = asset_repo.create(&cmd).await.unwrap();
 
         // Make asset dirty
@@ -387,6 +640,7 @@ mod tests {
             asset_repo,
             dirty_repo,
             InMemoryAssetVersionRepository::new(),
+            InMemoryDependencyRepository::new(),
         );
 
         // Resolve dirty
@@ -411,24 +665,20 @@ mod tests {
         let asset_repo = InMemoryAssetRepository::new();
         let dirty_repo = InMemoryDirtyQueueRepository::new();
 
-        // Create asset (starts as Clean)
-        let cmd = CreateAssetCommand {
-            name: "Test Asset".to_string(),
-            asset_type_id: type_id,
-            project_id: Some(project_id),
-            organization_id: org_id,
-            level: AssetLevel::Project,
-            external_ref: "https://example.com/asset/1".to_string(),
-            source: "manual".to_string(),
-            metadata: serde_json::json!({}),
-            idempotency_key: None,
-        };
+        let cmd = create_asset_command(
+            "Test Asset",
+            org_id,
+            project_id,
+            type_id,
+            serde_json::json!({}),
+        );
         let asset = asset_repo.create(&cmd).await.unwrap();
 
         let service = VersionService::new(
             asset_repo,
             dirty_repo,
             InMemoryAssetVersionRepository::new(),
+            InMemoryDependencyRepository::new(),
         );
 
         // Try to clean a Clean asset
@@ -450,24 +700,20 @@ mod tests {
         let asset_repo = InMemoryAssetRepository::new();
         let dirty_repo = InMemoryDirtyQueueRepository::new();
 
-        // Create asset
-        let cmd = CreateAssetCommand {
-            name: "Test Asset".to_string(),
-            asset_type_id: type_id,
-            project_id: Some(project_id),
-            organization_id: org_id,
-            level: AssetLevel::Project,
-            external_ref: "https://example.com/asset/1".to_string(),
-            source: "manual".to_string(),
-            metadata: serde_json::json!({}),
-            idempotency_key: None,
-        };
+        let cmd = create_asset_command(
+            "Test Asset",
+            org_id,
+            project_id,
+            type_id,
+            serde_json::json!({}),
+        );
         let asset = asset_repo.create(&cmd).await.unwrap();
 
         let service = VersionService::new(
             asset_repo,
             dirty_repo,
             InMemoryAssetVersionRepository::new(),
+            InMemoryDependencyRepository::new(),
         );
 
         // Initially no review needed

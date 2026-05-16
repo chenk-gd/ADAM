@@ -53,11 +53,23 @@ impl StatePropagator {
             return Err(StatePropagationError::ArchivedAssetCannotTrigger);
         }
 
-        // Find all downstream assets (assets that depend on this one)
-        let downstream = dependency_repo.find_downstream(asset_id).await?;
+        // Prefer rich dependency records so Dirty entries preserve the reviewed baseline.
+        let downstream: Vec<(AssetId, Option<String>)> =
+            match dependency_repo.find_downstream_dependencies(asset_id).await {
+                Ok(records) => records
+                    .into_iter()
+                    .map(|record| (record.source_id, Some(record.effective_version)))
+                    .collect(),
+                Err(_) => dependency_repo
+                    .find_downstream(asset_id)
+                    .await?
+                    .into_iter()
+                    .map(|downstream_id| (downstream_id, None))
+                    .collect(),
+            };
         let mut affected = Vec::new();
 
-        for downstream_id in downstream {
+        for (downstream_id, effective_version) in downstream {
             // Fetch downstream asset - must exist
             let downstream_asset = asset_repo.find_by_id(&downstream_id).await?.ok_or(
                 StatePropagationError::DownstreamAssetNotFound(downstream_id),
@@ -79,10 +91,12 @@ impl StatePropagator {
                 asset_id: downstream_id,
                 upstream_asset_id: *asset_id,
                 upstream_version: new_version.to_string(),
-                upstream_old_version: downstream_asset
-                    .current_version()
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "0.0.0".to_string()),
+                upstream_old_version: effective_version.unwrap_or_else(|| {
+                    downstream_asset
+                        .current_version()
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "0.0.0".to_string())
+                }),
                 impact_level: "medium".to_string(),
                 since: chrono::Utc::now(),
                 created_at: chrono::Utc::now(),
@@ -101,8 +115,9 @@ impl StatePropagator {
 mod tests {
     use super::*;
     use adam_domain::{
-        AssetId, AssetInstance, AssetState, AssetTypeId, DependencyRepository, DirtyQueueEntry,
-        DirtyQueueRepository, InMemoryAssetRepository, InMemoryDirtyQueueRepository,
+        AssetDependencyRecord, AssetId, AssetInstance, AssetState, AssetTypeId,
+        DependencyRepository, DirtyQueueEntry, DirtyQueueRepository, EffectiveUpdateReason,
+        InMemoryAssetRepository, InMemoryDependencyRepository, InMemoryDirtyQueueRepository,
         OrganizationId, RepositoryError,
     };
     use async_trait::async_trait;
@@ -280,6 +295,66 @@ mod tests {
         let entries = dirty_repo.find_all_unresolved().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].upstream_version, "v2.0.0");
+    }
+
+    #[tokio::test]
+    async fn propagate_dirty_uses_effective_dependency_baseline_as_old_version() {
+        let org_id = OrganizationId::new();
+        let type_id = AssetTypeId::new();
+
+        let asset_a = AssetInstance::new_organization_level(
+            "Asset A",
+            type_id,
+            org_id,
+            "https://example.com/a",
+            "manual",
+            serde_json::json!({}),
+        );
+        let asset_b = AssetInstance::new_organization_level(
+            "Asset B",
+            type_id,
+            org_id,
+            "https://example.com/b",
+            "manual",
+            serde_json::json!({}),
+        );
+
+        let dependency_repo = InMemoryDependencyRepository::new();
+        dependency_repo
+            .create_dependency_record(&AssetDependencyRecord {
+                id: uuid::Uuid::new_v4(),
+                source_id: asset_b.id,
+                target_id: asset_a.id,
+                relationship: "depends_on".to_string(),
+                declared_version: "1.0.0".to_string(),
+                effective_version: "1.0.3".to_string(),
+                effective_updated_by: "reviewer".to_string(),
+                effective_updated_at: chrono::Utc::now(),
+                effective_reason: EffectiveUpdateReason::ManualClean,
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let asset_repo = InMemoryAssetRepository::with_data(vec![asset_a.clone(), asset_b.clone()]);
+        let dirty_repo = InMemoryDirtyQueueRepository::new();
+        let propagator = StatePropagator::new();
+
+        propagator
+            .on_asset_published(
+                &asset_a.id,
+                "1.2.0",
+                &asset_repo,
+                &dependency_repo,
+                &dirty_repo,
+            )
+            .await
+            .unwrap();
+
+        let entries = dirty_repo.find_all_unresolved().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].upstream_old_version, "1.0.3");
+        assert_eq!(entries[0].upstream_version, "1.2.0");
     }
 
     #[tokio::test]
