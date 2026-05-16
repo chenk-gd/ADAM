@@ -640,7 +640,7 @@ impl adam_domain::AssetVersionRepository for PostgresAssetVersionRepository {
         sqlx::query(
             r#"
             INSERT INTO asset_versions (
-                id, asset_id, version_number, metadata, dependencies,
+                id, instance_id, version_number, metadata, dependencies,
                 release_notes, suggested_type, released_by, released_at
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -669,10 +669,10 @@ impl adam_domain::AssetVersionRepository for PostgresAssetVersionRepository {
         let rows = sqlx::query(
             r#"
             SELECT
-                id, asset_id, version_number, metadata, dependencies,
+                id, instance_id, version_number, metadata, dependencies,
                 release_notes, suggested_type, released_by, released_at
             FROM asset_versions
-            WHERE asset_id = $1
+            WHERE instance_id = $1
             ORDER BY released_at DESC
             "#,
         )
@@ -685,7 +685,7 @@ impl adam_domain::AssetVersionRepository for PostgresAssetVersionRepository {
             .iter()
             .map(|row| adam_domain::AssetVersion {
                 id: adam_domain::asset::version::AssetVersionId(row.get("id")),
-                asset_id: AssetId::from_uuid(row.get("asset_id")),
+                asset_id: AssetId::from_uuid(row.get("instance_id")),
                 version_number: row.get("version_number"),
                 metadata: row.get("metadata"),
                 dependencies: serde_json::from_value(row.get("dependencies")).unwrap_or_default(),
@@ -705,10 +705,10 @@ impl adam_domain::AssetVersionRepository for PostgresAssetVersionRepository {
         let row = sqlx::query(
             r#"
             SELECT
-                id, asset_id, version_number, metadata, dependencies,
+                id, instance_id, version_number, metadata, dependencies,
                 release_notes, suggested_type, released_by, released_at
             FROM asset_versions
-            WHERE asset_id = $1 AND version_number = $2
+            WHERE instance_id = $1 AND version_number = $2
             "#,
         )
         .bind(asset_id.0)
@@ -719,7 +719,7 @@ impl adam_domain::AssetVersionRepository for PostgresAssetVersionRepository {
 
         Ok(row.map(|row| adam_domain::AssetVersion {
             id: adam_domain::asset::version::AssetVersionId(row.get("id")),
-            asset_id: AssetId::from_uuid(row.get("asset_id")),
+            asset_id: AssetId::from_uuid(row.get("instance_id")),
             version_number: row.get("version_number"),
             metadata: row.get("metadata"),
             dependencies: serde_json::from_value(row.get("dependencies")).unwrap_or_default(),
@@ -737,10 +737,10 @@ impl adam_domain::AssetVersionRepository for PostgresAssetVersionRepository {
         let row = sqlx::query(
             r#"
             SELECT
-                id, asset_id, version_number, metadata, dependencies,
+                id, instance_id, version_number, metadata, dependencies,
                 release_notes, suggested_type, released_by, released_at
             FROM asset_versions
-            WHERE asset_id = $1
+            WHERE instance_id = $1
             ORDER BY released_at DESC
             LIMIT 1
             "#,
@@ -752,7 +752,7 @@ impl adam_domain::AssetVersionRepository for PostgresAssetVersionRepository {
 
         Ok(row.map(|row| adam_domain::AssetVersion {
             id: adam_domain::asset::version::AssetVersionId(row.get("id")),
-            asset_id: AssetId::from_uuid(row.get("asset_id")),
+            asset_id: AssetId::from_uuid(row.get("instance_id")),
             version_number: row.get("version_number"),
             metadata: row.get("metadata"),
             dependencies: serde_json::from_value(row.get("dependencies")).unwrap_or_default(),
@@ -767,6 +767,35 @@ impl adam_domain::AssetVersionRepository for PostgresAssetVersionRepository {
 #[cfg(test)]
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn asset_version_sql_uses_instance_id_column() {
+        let source = include_str!("postgres.rs");
+        let version_repo_impl = source
+            .split("impl adam_domain::AssetVersionRepository for PostgresAssetVersionRepository")
+            .nth(1)
+            .and_then(|tail| tail.split("#[cfg(test)]").next())
+            .expect("expected PostgresAssetVersionRepository impl block");
+        let bad_column_list = ["id, ", "asset_id", ", version_number"].concat();
+        let bad_where_clause = ["WHERE ", "asset_id", " = $1"].concat();
+
+        assert!(
+            version_repo_impl.contains("id, instance_id, version_number"),
+            "asset_versions SELECT/INSERT columns must include instance_id"
+        );
+        assert!(
+            version_repo_impl.contains("WHERE instance_id = $1"),
+            "asset_versions lookup SQL must filter by instance_id"
+        );
+        assert!(
+            !version_repo_impl.contains(&bad_column_list),
+            "asset_versions SQL must not select or insert non-existent column asset_id"
+        );
+        assert!(
+            !version_repo_impl.contains(&bad_where_clause),
+            "asset_versions SQL must not filter by non-existent column asset_id"
+        );
+    }
+
     // Note: These tests require a running PostgreSQL instance
     // They are marked with #[ignore] by default and should be run with:
     // cargo test --features integration-tests -- --ignored
