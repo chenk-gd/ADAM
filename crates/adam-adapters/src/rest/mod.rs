@@ -22,10 +22,10 @@ use adam_application::services::{
     state_propagator::StatePropagationError,
 };
 use adam_domain::{
-    AssetId, AssetInstance, AssetRepository, AssetState, AssetTypeId, AssetTypeRepository,
-    AssetVersionRepository, AuthPrincipal, AuthorizationError, CreateAssetCommand,
-    DependencyRepository, DirtyQueueRepository, DirtyResolutionLogRepository, OrganizationId,
-    ProjectId, RepositoryError, Role,
+    AssetDependencyRecord, AssetId, AssetInstance, AssetRepository, AssetState, AssetTypeId,
+    AssetTypeRepository, AssetVersion, AssetVersionRepository, AuthPrincipal, AuthorizationError,
+    CreateAssetCommand, DependencyRepository, DirtyQueueRepository, DirtyResolutionLogRepository,
+    OrganizationId, ProjectId, RepositoryError, Role,
 };
 
 // ============================================================================
@@ -416,6 +416,85 @@ pub struct PublishResponse {
     pub affected_assets: Vec<Uuid>,
 }
 
+/// Asset version response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AssetVersionResponse {
+    pub id: Uuid,
+    pub asset_id: Uuid,
+    pub version_number: String,
+    pub metadata: serde_json::Value,
+    pub dependencies: Vec<DependencySnapshotResponse>,
+    pub release_notes: String,
+    pub suggested_type: Option<String>,
+    pub released_by: String,
+    pub released_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DependencySnapshotResponse {
+    pub upstream_asset_id: Uuid,
+    pub upstream_version: String,
+}
+
+impl From<AssetVersion> for AssetVersionResponse {
+    fn from(version: AssetVersion) -> Self {
+        Self {
+            id: version.id.0,
+            asset_id: version.asset_id.0,
+            version_number: version.version_number,
+            metadata: version.metadata,
+            dependencies: version
+                .dependencies
+                .into_iter()
+                .map(|dependency| DependencySnapshotResponse {
+                    upstream_asset_id: dependency.upstream_asset_id.0,
+                    upstream_version: dependency.upstream_version,
+                })
+                .collect(),
+            release_notes: version.release_notes,
+            suggested_type: version.suggested_type,
+            released_by: version.released_by,
+            released_at: version.released_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AssetDependencyResponse {
+    pub id: Uuid,
+    pub source_id: Uuid,
+    pub target_id: Uuid,
+    pub relationship: String,
+    pub declared_version: String,
+    pub effective_version: String,
+    pub effective_updated_by: String,
+    pub effective_reason: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<AssetDependencyRecord> for AssetDependencyResponse {
+    fn from(record: AssetDependencyRecord) -> Self {
+        Self {
+            id: record.id,
+            source_id: record.source_id.0,
+            target_id: record.target_id.0,
+            relationship: record.relationship,
+            declared_version: record.declared_version,
+            effective_version: record.effective_version,
+            effective_updated_by: record.effective_updated_by,
+            effective_reason: record.effective_reason.as_str().to_string(),
+            created_at: record.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DependencyGraphResponse {
+    pub asset_id: Uuid,
+    pub upstream: Vec<AssetDependencyResponse>,
+    pub downstream: Vec<AssetDependencyResponse>,
+}
+
 /// Resolve dirty request
 #[derive(Debug, Deserialize)]
 pub struct ResolveRequest {
@@ -735,9 +814,8 @@ pub async fn publish_asset(
         .await
         .map_err(ApiError::from)?
         .ok_or(ApiError::NotFound)?;
-    check_asset_access(&auth.principal, &asset).map_err(|_| {
-        ApiError::Forbidden("User cannot publish this asset".to_string())
-    })?;
+    check_asset_access(&auth.principal, &asset)
+        .map_err(|_| ApiError::Forbidden("User cannot publish this asset".to_string()))?;
 
     let service = VersionService::new(
         state.asset_repo.clone(),
@@ -809,9 +887,8 @@ pub async fn resolve_dirty(
         .await
         .map_err(ApiError::from)?
         .ok_or(ApiError::NotFound)?;
-    check_asset_access(&auth.principal, &asset).map_err(|_| {
-        ApiError::Forbidden("User cannot resolve this asset".to_string())
-    })?;
+    check_asset_access(&auth.principal, &asset)
+        .map_err(|_| ApiError::Forbidden("User cannot resolve this asset".to_string()))?;
 
     let unresolved = state
         .dirty_repo
@@ -863,6 +940,153 @@ pub async fn resolve_dirty(
         .await
         .map_err(ApiError::from)?;
 
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// List publish history for an asset
+pub async fn list_asset_versions(
+    State(state): State<AppState>,
+    ExtractAuth(auth): ExtractAuth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<AssetVersionResponse>>, ApiError> {
+    let asset_id = AssetId::from_uuid(id);
+    let asset = state
+        .asset_repo
+        .find_by_id(&asset_id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+    check_asset_access(&auth.principal, &asset)
+        .map_err(|_| ApiError::Forbidden("User cannot read this asset".to_string()))?;
+
+    let versions = state
+        .version_repo
+        .find_by_asset(&asset_id)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(
+        versions
+            .into_iter()
+            .map(AssetVersionResponse::from)
+            .collect(),
+    ))
+}
+
+/// Get a single asset version
+pub async fn get_asset_version(
+    State(state): State<AppState>,
+    ExtractAuth(auth): ExtractAuth,
+    Path((id, version)): Path<(Uuid, String)>,
+) -> Result<Json<AssetVersionResponse>, ApiError> {
+    let asset_id = AssetId::from_uuid(id);
+    let asset = state
+        .asset_repo
+        .find_by_id(&asset_id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+    check_asset_access(&auth.principal, &asset)
+        .map_err(|_| ApiError::Forbidden("User cannot read this asset".to_string()))?;
+
+    let version = state
+        .version_repo
+        .find_by_version(&asset_id, &version)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(version.into()))
+}
+
+/// List upstream dependencies for an asset
+pub async fn list_asset_dependencies(
+    State(state): State<AppState>,
+    ExtractAuth(auth): ExtractAuth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<AssetDependencyResponse>>, ApiError> {
+    let asset_id = AssetId::from_uuid(id);
+    let asset = state
+        .asset_repo
+        .find_by_id(&asset_id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+    check_asset_access(&auth.principal, &asset)
+        .map_err(|_| ApiError::Forbidden("User cannot read this asset".to_string()))?;
+
+    let dependencies = state
+        .dependency_repo
+        .find_upstream_dependencies(&asset_id)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(
+        dependencies
+            .into_iter()
+            .map(AssetDependencyResponse::from)
+            .collect(),
+    ))
+}
+
+/// Return direct upstream and downstream dependency records
+pub async fn get_dependency_graph(
+    State(state): State<AppState>,
+    ExtractAuth(auth): ExtractAuth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<DependencyGraphResponse>, ApiError> {
+    let asset_id = AssetId::from_uuid(id);
+    let asset = state
+        .asset_repo
+        .find_by_id(&asset_id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+    check_asset_access(&auth.principal, &asset)
+        .map_err(|_| ApiError::Forbidden("User cannot read this asset".to_string()))?;
+
+    let upstream = state
+        .dependency_repo
+        .find_upstream_dependencies(&asset_id)
+        .await
+        .map_err(ApiError::from)?;
+    let downstream = state
+        .dependency_repo
+        .find_downstream_dependencies(&asset_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(DependencyGraphResponse {
+        asset_id: id,
+        upstream: upstream
+            .into_iter()
+            .map(AssetDependencyResponse::from)
+            .collect(),
+        downstream: downstream
+            .into_iter()
+            .map(AssetDependencyResponse::from)
+            .collect(),
+    }))
+}
+
+/// Archive an asset
+pub async fn archive_asset(
+    State(state): State<AppState>,
+    ExtractAuth(auth): ExtractAuth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let asset_id = AssetId::from_uuid(id);
+    let asset = state
+        .asset_repo
+        .find_by_id(&asset_id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+    check_asset_access(&auth.principal, &asset)
+        .map_err(|_| ApiError::Forbidden("User cannot archive this asset".to_string()))?;
+
+    state
+        .asset_repo
+        .update_state(&asset_id, AssetState::Archived)
+        .await
+        .map_err(ApiError::from)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1058,7 +1282,23 @@ pub fn create_router(state: AppState) -> Router {
             get(get_asset).put(update_asset).delete(delete_asset),
         )
         .route("/api/v1/assets/{id}/publish", post(publish_asset))
+        .route("/api/v1/assets/{id}/releases", post(publish_asset))
         .route("/api/v1/assets/{id}/resolve", post(resolve_dirty))
+        .route("/api/v1/assets/{id}/manual-clean", post(resolve_dirty))
+        .route("/api/v1/assets/{id}/versions", get(list_asset_versions))
+        .route(
+            "/api/v1/assets/{id}/versions/{version}",
+            get(get_asset_version),
+        )
+        .route(
+            "/api/v1/assets/{id}/dependencies",
+            get(list_asset_dependencies),
+        )
+        .route(
+            "/api/v1/assets/{id}/dependency-graph",
+            get(get_dependency_graph),
+        )
+        .route("/api/v1/assets/{id}/archive", post(archive_asset))
         // AssetType routes (FR-001/002)
         .route(
             "/api/v1/asset-types",
@@ -1554,6 +1794,429 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(updated.state(), AssetState::Clean);
+    }
+
+    #[tokio::test]
+    async fn release_creates_version_and_updates_current_version() {
+        let state = create_test_state();
+        let org_id = OrganizationId::new();
+        let asset = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Release Asset".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: None,
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Organization,
+                external_ref: "https://example.com/release".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({"kind": "design"}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        let app = create_router(state.clone());
+        let (auth_header, auth_value) =
+            test_auth_header(org_id.0, "publisher", &[Role::Developer], &[]);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/v1/assets/{}/releases", asset.id.0))
+                    .header("content-type", "application/json")
+                    .header(&auth_header, &auth_value)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "version": "v1.2.0",
+                            "release_notes": "first public release",
+                            "suggested_type": "minor"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let published: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(published["version"], "1.2.0");
+
+        let versions = state.version_repo.find_by_asset(&asset.id).await.unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].release_notes, "first public release");
+
+        let updated = state
+            .asset_repo
+            .find_by_id(&asset.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.current_version().map(String::as_str), Some("1.2.0"));
+        assert_eq!(updated.publisher().map(String::as_str), Some("publisher"));
+    }
+
+    #[tokio::test]
+    async fn release_propagates_dirty_to_downstream() {
+        let state = create_test_state();
+        let org_id = OrganizationId::new();
+        let upstream = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Upstream".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: None,
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Organization,
+                external_ref: "https://example.com/upstream".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+        let downstream = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Downstream".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: None,
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Organization,
+                external_ref: "https://example.com/downstream".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+        state
+            .dependency_repo
+            .create_dependency_record(&adam_domain::AssetDependencyRecord {
+                id: uuid::Uuid::new_v4(),
+                source_id: downstream.id,
+                target_id: upstream.id,
+                relationship: "depends_on".to_string(),
+                declared_version: "1.0.0".to_string(),
+                effective_version: "1.0.0".to_string(),
+                effective_updated_by: "publisher".to_string(),
+                effective_updated_at: chrono::Utc::now(),
+                effective_reason: adam_domain::EffectiveUpdateReason::Publish,
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let app = create_router(state.clone());
+        let (auth_header, auth_value) =
+            test_auth_header(org_id.0, "publisher", &[Role::Developer], &[]);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/v1/assets/{}/releases", upstream.id.0))
+                    .header("content-type", "application/json")
+                    .header(&auth_header, &auth_value)
+                    .body(Body::from(r#"{"version": "1.1.0"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let updated = state
+            .asset_repo
+            .find_by_id(&downstream.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.state(), AssetState::Dirty);
+    }
+
+    #[tokio::test]
+    async fn manual_clean_writes_log_and_does_not_propagate_dirty() {
+        let state = create_test_state();
+        let org_id = OrganizationId::new();
+        let asset = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Dirty Asset".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: None,
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Organization,
+                external_ref: "https://example.com/dirty".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+        let downstream = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Downstream".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: None,
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Organization,
+                external_ref: "https://example.com/downstream".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+        state
+            .asset_repo
+            .update_state(&asset.id, AssetState::Dirty)
+            .await
+            .unwrap();
+
+        let upstream_id = AssetId::new();
+        for (source_id, target_id) in [(asset.id, upstream_id), (downstream.id, asset.id)] {
+            state
+                .dependency_repo
+                .create_dependency_record(&adam_domain::AssetDependencyRecord {
+                    id: uuid::Uuid::new_v4(),
+                    source_id,
+                    target_id,
+                    relationship: "depends_on".to_string(),
+                    declared_version: "1.0.0".to_string(),
+                    effective_version: "1.0.0".to_string(),
+                    effective_updated_by: "publisher".to_string(),
+                    effective_updated_at: chrono::Utc::now(),
+                    effective_reason: adam_domain::EffectiveUpdateReason::Publish,
+                    created_at: chrono::Utc::now(),
+                })
+                .await
+                .unwrap();
+        }
+        state
+            .dirty_repo
+            .upsert(&adam_domain::DirtyQueueEntry {
+                id: uuid::Uuid::new_v4(),
+                asset_id: asset.id,
+                upstream_asset_id: upstream_id,
+                upstream_version: "1.1.0".to_string(),
+                upstream_old_version: "1.0.0".to_string(),
+                impact_level: "medium".to_string(),
+                since: chrono::Utc::now(),
+                created_at: chrono::Utc::now(),
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+
+        let app = create_router(state.clone());
+        let (auth_header, auth_value) =
+            test_auth_header(org_id.0, "reviewer", &[Role::Developer], &[]);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/v1/assets/{}/manual-clean", asset.id.0))
+                    .header("content-type", "application/json")
+                    .header(&auth_header, &auth_value)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "resolved_version": "1.0.1",
+                            "reviewed_by": "reviewer",
+                            "resolutions": [{
+                                "upstream_asset_id": upstream_id.0,
+                                "from_version": "1.0.0",
+                                "to_version": "1.1.0",
+                                "review_result": "no_impact",
+                                "comment": "no code impact"
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let logs = state.dirty_log_repo.find_by_asset(&asset.id).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].review_result, "no_impact");
+        let downstream = state
+            .asset_repo
+            .find_by_id(&downstream.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(downstream.state(), AssetState::Clean);
+    }
+
+    #[tokio::test]
+    async fn dependency_graph_returns_direct_upstream_and_downstream() {
+        let state = create_test_state();
+        let org_id = OrganizationId::new();
+        let asset = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Center".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: None,
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Organization,
+                external_ref: "https://example.com/center".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+        let upstream = AssetId::new();
+        let downstream = AssetId::new();
+        for (source_id, target_id) in [(asset.id, upstream), (downstream, asset.id)] {
+            state
+                .dependency_repo
+                .create_dependency_record(&adam_domain::AssetDependencyRecord {
+                    id: uuid::Uuid::new_v4(),
+                    source_id,
+                    target_id,
+                    relationship: "depends_on".to_string(),
+                    declared_version: "1.0.0".to_string(),
+                    effective_version: "1.0.0".to_string(),
+                    effective_updated_by: "publisher".to_string(),
+                    effective_updated_at: chrono::Utc::now(),
+                    effective_reason: adam_domain::EffectiveUpdateReason::Publish,
+                    created_at: chrono::Utc::now(),
+                })
+                .await
+                .unwrap();
+        }
+
+        let app = create_router(state);
+        let (auth_header, auth_value) =
+            test_auth_header(org_id.0, "reader", &[Role::Developer], &[]);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/v1/assets/{}/dependency-graph", asset.id.0))
+                    .header(&auth_header, &auth_value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let graph: DependencyGraphResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(graph.upstream.len(), 1);
+        assert_eq!(graph.downstream.len(), 1);
+        assert_eq!(graph.upstream[0].target_id, upstream.0);
+        assert_eq!(graph.downstream[0].source_id, downstream.0);
+    }
+
+    #[tokio::test]
+    async fn version_history_returns_persisted_versions() {
+        let state = create_test_state();
+        let org_id = OrganizationId::new();
+        let asset = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Versioned".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: None,
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Organization,
+                external_ref: "https://example.com/versioned".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+        let version = adam_domain::AssetVersion::new(
+            asset.id,
+            "1.0.0",
+            serde_json::json!({}),
+            vec![],
+            "release",
+            "publisher",
+        );
+        state.version_repo.create(&version).await.unwrap();
+
+        let app = create_router(state);
+        let (auth_header, auth_value) =
+            test_auth_header(org_id.0, "reader", &[Role::Developer], &[]);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/v1/assets/{}/versions", asset.id.0))
+                    .header(&auth_header, &auth_value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let versions: Vec<AssetVersionResponse> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].version_number, "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn archive_endpoint_marks_asset_archived() {
+        let state = create_test_state();
+        let org_id = OrganizationId::new();
+        let asset = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Archive Me".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: None,
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Organization,
+                external_ref: "https://example.com/archive".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        let app = create_router(state.clone());
+        let (auth_header, auth_value) =
+            test_auth_header(org_id.0, "developer", &[Role::Developer], &[]);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/v1/assets/{}/archive", asset.id.0))
+                    .header(&auth_header, &auth_value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let archived = state
+            .asset_repo
+            .find_by_id(&asset.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(archived.state(), AssetState::Archived);
     }
 
     #[tokio::test]
