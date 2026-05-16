@@ -33,6 +33,8 @@ async fn main() -> anyhow::Result<()> {
         asset_repo: asset_repo.clone(),
         dependency_repo: dependency_repo.clone(),
         dirty_repo: dirty_repo.clone(),
+        version_repo: version_repo.clone(),
+        dirty_log_repo: dirty_log_repo.clone(),
         virtual_repo: virtual_repo.clone(),
         principal,
     };

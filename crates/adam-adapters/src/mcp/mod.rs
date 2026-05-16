@@ -5,6 +5,9 @@
 
 use adam_application::VersionService;
 use adam_application::services::version_service::ChangeType;
+use adam_application::services::{
+    ManualCleanCommand, ManualCleanResolution, PublishAssetCommand, PublishDependency,
+};
 use rmcp::{
     ServerHandler,
     model::{CallToolRequestParam, CallToolResult, Content, Implementation, ServerInfo, Tool},
@@ -15,9 +18,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use adam_domain::{
-    AssetId, AssetInstance, AssetRepository, AssetTypeId, AuthPrincipal, AuthorizationError,
-    AuthorizationService, DependencyRepository, DirtyQueueRepository, OrganizationId, Permission,
-    ProjectId, RepositoryError, VirtualInstance, VirtualInstanceRepository,
+    AssetId, AssetInstance, AssetRepository, AssetTypeId, AssetVersionRepository, AuthPrincipal,
+    AuthorizationError, AuthorizationService, DependencyRepository, DirtyQueueRepository,
+    DirtyResolutionLogRepository, OrganizationId, Permission, ProjectId, RepositoryError,
+    VirtualInstance, VirtualInstanceRepository,
 };
 
 // ============================================================================
@@ -30,6 +34,8 @@ pub struct McpServerState {
     pub asset_repo: Arc<dyn AssetRepository>,
     pub dependency_repo: Arc<dyn DependencyRepository>,
     pub dirty_repo: Arc<dyn DirtyQueueRepository>,
+    pub version_repo: Arc<dyn AssetVersionRepository>,
+    pub dirty_log_repo: Arc<dyn DirtyResolutionLogRepository>,
     pub virtual_repo: Arc<dyn VirtualInstanceRepository>,
     /// Session authentication principal
     pub principal: AuthPrincipal,
@@ -292,8 +298,23 @@ pub struct RefreshAssetStateResponse {
 pub struct ManualCleanAssetRequest {
     /// Asset ID to clean
     pub asset_id: String,
+    /// Asset version being reviewed
+    pub resolved_version: Option<String>,
+    /// Explicit reviewer ID
+    pub reviewed_by: Option<String>,
+    /// Explicit upstream resolutions. If omitted, unresolved dirty entries are accepted.
+    pub resolutions: Option<Vec<ManualCleanResolutionInput>>,
     /// Review notes
     pub review_notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ManualCleanResolutionInput {
+    pub upstream_asset_id: String,
+    pub from_version: String,
+    pub to_version: String,
+    pub review_result: String,
+    pub comment: Option<String>,
 }
 
 /// Manual clean asset tool response
@@ -821,8 +842,6 @@ impl AdamMcpServer {
         &self,
         request: PublishAssetRequest,
     ) -> Result<CallToolResult, rmcp::Error> {
-        use adam_application::services::state_propagator::StatePropagator;
-
         // Parse asset ID
         let asset_id = match parse_uuid(&request.asset_id) {
             Some(id) => AssetId::from_uuid(id),
@@ -859,19 +878,57 @@ impl AdamMcpServer {
         // Generate version if not provided
         let version = request.version.unwrap_or_else(|| "1.0.0".to_string());
 
-        // Create and execute state propagator for dirty propagation
-        let propagator = StatePropagator::new();
-        let affected = match propagator
-            .on_asset_published(
-                &asset_id,
-                &version,
-                self.state.asset_repo.as_ref(),
-                self.state.dependency_repo.as_ref(),
-                self.state.dirty_repo.as_ref(),
-            )
+        let mut dependencies = Vec::new();
+        for dependency_id in request.dependencies.unwrap_or_default() {
+            let upstream_asset_id = match parse_uuid(&dependency_id) {
+                Some(id) => AssetId::from_uuid(id),
+                None => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid dependency ID format: {dependency_id}"
+                    ))]));
+                }
+            };
+            let upstream = match self.state.asset_repo.find_by_id(&upstream_asset_id).await {
+                Ok(Some(asset)) => asset,
+                Ok(None) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Dependency asset not found: {dependency_id}"
+                    ))]));
+                }
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Repository error: {e}"
+                    ))]));
+                }
+            };
+            dependencies.push(PublishDependency {
+                upstream_asset_id,
+                version: upstream
+                    .current_version()
+                    .cloned()
+                    .unwrap_or_else(|| "0.0.0".to_string()),
+            });
+        }
+
+        let service = VersionService::new(
+            self.state.asset_repo.clone(),
+            self.state.dirty_repo.clone(),
+            self.state.version_repo.clone(),
+            self.state.dependency_repo.clone(),
+            self.state.dirty_log_repo.clone(),
+        );
+        let published = match service
+            .publish(PublishAssetCommand {
+                asset_id,
+                version: version.clone(),
+                publisher: self.state.principal.id.clone(),
+                release_notes: String::new(),
+                dependencies,
+                suggested_type: None,
+            })
             .await
         {
-            Ok(affected) => affected,
+            Ok(version) => version,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Publish failed: {e}"
@@ -881,21 +938,15 @@ impl AdamMcpServer {
 
         let response = PublishAssetResponse {
             asset_id: asset.id.0.to_string(),
-            version: version.clone(),
+            version: published.version_number.clone(),
             published_version: PublishedVersionInfo {
-                version,
-                published_at: chrono::Utc::now().to_rfc3339(),
+                version: published.version_number,
+                published_at: published.released_at.to_rfc3339(),
             },
         };
 
-        // Add affected assets info
-        let affected_ids: Vec<String> = affected.iter().map(|id| id.0.to_string()).collect();
-
         match serde_json::to_string(&response) {
-            Ok(json) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "{json}\n\nAffected downstream assets: {}",
-                affected_ids.join(", ")
-            ))])),
+            Ok(json) => Ok(CallToolResult::success(vec![Content::text(json)])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Serialization error: {e}"
             ))])),
@@ -1112,7 +1163,6 @@ impl AdamMcpServer {
 
         let previous_state = format!("{:?}", asset.state());
 
-        // Check for unresolved dirty queue entries
         let unresolved = self
             .state
             .dirty_repo
@@ -1125,38 +1175,91 @@ impl AdamMcpServer {
                 )
             })?;
 
-        // Mark all unresolved entries as resolved
-        for entry in &unresolved {
-            self.state
-                .dirty_repo
-                .resolve(&entry.id)
-                .await
-                .map_err(|e| {
-                    rmcp::Error::internal_error(
-                        format!("Failed to resolve dirty entry: {e}"),
-                        None::<serde_json::Value>,
-                    )
-                })?;
+        let asset_version = request
+            .resolved_version
+            .or_else(|| asset.current_version().cloned())
+            .unwrap_or_else(|| "0.0.0".to_string());
+        let resolutions = match request.resolutions {
+            Some(resolutions) => {
+                let mut parsed = Vec::new();
+                for resolution in resolutions {
+                    let upstream_asset_id = match parse_uuid(&resolution.upstream_asset_id) {
+                        Some(id) => AssetId::from_uuid(id),
+                        None => {
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "Invalid upstream_asset_id format: {}",
+                                resolution.upstream_asset_id
+                            ))]));
+                        }
+                    };
+                    parsed.push(ManualCleanResolution {
+                        upstream_asset_id,
+                        from_version: resolution.from_version,
+                        to_version: resolution.to_version,
+                        review_result: resolution.review_result,
+                        comment: resolution.comment.or_else(|| request.review_notes.clone()),
+                    });
+                }
+                parsed
+            }
+            None => unresolved
+                .iter()
+                .map(|entry| ManualCleanResolution {
+                    upstream_asset_id: entry.upstream_asset_id,
+                    from_version: entry.upstream_old_version.clone(),
+                    to_version: entry.upstream_version.clone(),
+                    review_result: "accepted".to_string(),
+                    comment: request.review_notes.clone(),
+                })
+                .collect(),
+        };
+
+        let service = VersionService::new(
+            self.state.asset_repo.clone(),
+            self.state.dirty_repo.clone(),
+            self.state.version_repo.clone(),
+            self.state.dependency_repo.clone(),
+            self.state.dirty_log_repo.clone(),
+        );
+        if let Err(e) = service
+            .manual_clean(ManualCleanCommand {
+                asset_id,
+                asset_version,
+                reviewed_by: request
+                    .reviewed_by
+                    .unwrap_or_else(|| self.state.principal.id.clone()),
+                resolutions,
+            })
+            .await
+        {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Manual clean failed: {e}"
+            ))]));
         }
 
-        // Update asset state to Clean
-        self.state
+        let review_id = uuid::Uuid::new_v4().to_string();
+        let updated = self
+            .state
             .asset_repo
-            .update_state(&asset_id, adam_domain::asset::state::AssetState::Clean)
+            .find_by_id(&asset_id)
             .await
             .map_err(|e| {
                 rmcp::Error::internal_error(
-                    format!("Failed to update asset state: {e}"),
+                    format!("Failed to reload asset: {e}"),
+                    None::<serde_json::Value>,
+                )
+            })?
+            .ok_or_else(|| {
+                rmcp::Error::internal_error(
+                    "Asset disappeared after clean",
                     None::<serde_json::Value>,
                 )
             })?;
 
-        let review_id = uuid::Uuid::new_v4().to_string();
-
         let response = ManualCleanAssetResponse {
             asset_id: asset.id.0.to_string(),
             previous_state,
-            current_state: "Clean".to_string(),
+            current_state: format!("{:?}", updated.state()),
             review_id,
         };
 
@@ -1476,6 +1579,8 @@ mod tests {
             asset_repo: Arc::new(InMemoryAssetRepository::new()),
             dependency_repo: Arc::new(adam_domain::InMemoryDependencyRepository::new()),
             dirty_repo: Arc::new(InMemoryDirtyQueueRepository::new()),
+            version_repo: Arc::new(adam_domain::InMemoryAssetVersionRepository::new()),
+            dirty_log_repo: Arc::new(adam_domain::InMemoryDirtyResolutionLogRepository::new()),
             virtual_repo: Arc::new(InMemoryVirtualInstanceRepository::new()),
             principal: AuthPrincipal {
                 id: "test-user".to_string(),
@@ -1849,6 +1954,70 @@ mod tests {
 
         let tool_result = result.unwrap();
         assert!(!tool_result.is_error.unwrap_or(true));
+
+        let content_text = &tool_result.content[0].as_text().unwrap().text;
+        let response: PublishAssetResponse = serde_json::from_str(content_text).unwrap();
+        assert_eq!(response.version, "1.0.0");
+
+        let versions = state.version_repo.find_by_asset(&asset.id).await.unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].version_number, "1.0.0");
+
+        let updated = state
+            .asset_repo
+            .find_by_id(&asset.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.current_version().map(String::as_str), Some("1.0.0"));
+    }
+
+    #[tokio::test]
+    async fn suggest_version_uses_current_persisted_version() {
+        let state = create_test_state();
+        let server = AdamMcpServer::new(state.clone());
+
+        let project_id = state.principal.project_memberships[0];
+        let org_id = state.principal.organization_id;
+        let asset = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Versioned Asset".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: Some(project_id),
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Project,
+                external_ref: "https://example.com/asset".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+        state
+            .asset_repo
+            .update_publication(
+                &asset.id,
+                "1.2.3".to_string(),
+                "publisher".to_string(),
+                AssetState::Clean,
+            )
+            .await
+            .unwrap();
+
+        let result = server
+            .suggest_version(SuggestVersionRequest {
+                asset_id: asset.id.0.to_string(),
+                change_type: Some("patch".to_string()),
+            })
+            .await
+            .unwrap();
+
+        assert!(!result.is_error.unwrap_or(true));
+        let content_text = &result.content[0].as_text().unwrap().text;
+        let response: SuggestVersionResponse = serde_json::from_str(content_text).unwrap();
+        assert_eq!(response.current_version, Some("1.2.3".to_string()));
+        assert_eq!(response.suggested_version, "1.2.4");
     }
 
     #[tokio::test]
@@ -2007,5 +2176,157 @@ mod tests {
             .unwrap();
         assert_eq!(dirty_entries.len(), 1);
         assert_eq!(dirty_entries[0].upstream_version, "2.0.0");
+    }
+
+    #[tokio::test]
+    async fn manual_clean_asset_logs_review() {
+        let state = create_test_state();
+        let server = AdamMcpServer::new(state.clone());
+
+        let project_id = state.principal.project_memberships[0];
+        let org_id = state.principal.organization_id;
+        let asset = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Dirty Asset".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: Some(project_id),
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Project,
+                external_ref: "https://example.com/dirty".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+        state
+            .asset_repo
+            .update_state(&asset.id, AssetState::Dirty)
+            .await
+            .unwrap();
+        let upstream_id = AssetId::new();
+        state
+            .dependency_repo
+            .create_dependency_record(&adam_domain::AssetDependencyRecord {
+                id: uuid::Uuid::new_v4(),
+                source_id: asset.id,
+                target_id: upstream_id,
+                relationship: "depends_on".to_string(),
+                declared_version: "1.0.0".to_string(),
+                effective_version: "1.0.0".to_string(),
+                effective_updated_by: "publisher".to_string(),
+                effective_updated_at: chrono::Utc::now(),
+                effective_reason: adam_domain::EffectiveUpdateReason::Publish,
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        state
+            .dirty_repo
+            .upsert(&adam_domain::DirtyQueueEntry {
+                id: uuid::Uuid::new_v4(),
+                asset_id: asset.id,
+                upstream_asset_id: upstream_id,
+                upstream_version: "1.1.0".to_string(),
+                upstream_old_version: "1.0.0".to_string(),
+                impact_level: "medium".to_string(),
+                since: chrono::Utc::now(),
+                created_at: chrono::Utc::now(),
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+
+        let result = server
+            .manual_clean_asset(ManualCleanAssetRequest {
+                asset_id: asset.id.0.to_string(),
+                resolved_version: Some("1.0.1".to_string()),
+                reviewed_by: Some("reviewer".to_string()),
+                resolutions: None,
+                review_notes: Some("no impact".to_string()),
+            })
+            .await
+            .unwrap();
+
+        assert!(!result.is_error.unwrap_or(true));
+        let logs = state.dirty_log_repo.find_by_asset(&asset.id).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].reviewed_by, "reviewer");
+        assert_eq!(logs[0].comment, Some("no impact".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_virtual_context_includes_anchor_upstream() {
+        let state = create_test_state();
+        let server = AdamMcpServer::new(state.clone());
+
+        let project_id = state.principal.project_memberships[0];
+        let org_id = state.principal.organization_id;
+        let upstream = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Upstream Context".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: Some(project_id),
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Project,
+                external_ref: "https://example.com/upstream".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+        let anchor = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Anchor Context".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: Some(project_id),
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Project,
+                external_ref: "https://example.com/anchor".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+        state
+            .dependency_repo
+            .create_dependency(&anchor.id, &upstream.id)
+            .await
+            .unwrap();
+
+        let create_result = server
+            .create_virtual_asset(CreateVirtualAssetRequest {
+                target_type: AssetTypeId::new().0.to_string(),
+                anchors: vec![anchor.id.0.to_string()],
+                project_id: project_id.0.to_string(),
+            })
+            .await
+            .unwrap();
+        let create_text = &create_result.content[0].as_text().unwrap().text;
+        let created: CreateVirtualAssetResponse = serde_json::from_str(create_text).unwrap();
+
+        let result = server
+            .get_virtual_context(GetVirtualContextRequest {
+                virtual_asset_id: created.virtual_asset_id,
+            })
+            .await
+            .unwrap();
+
+        assert!(!result.is_error.unwrap_or(true));
+        let content_text = &result.content[0].as_text().unwrap().text;
+        let context: GetVirtualContextResponse = serde_json::from_str(content_text).unwrap();
+        assert!(
+            context.context_assets.iter().any(|asset| {
+                asset.id == anchor.id.0.to_string() && asset.relevance == "anchor"
+            })
+        );
+        assert!(context.context_assets.iter().any(|asset| {
+            asset.id == upstream.id.0.to_string() && asset.relevance == "upstream"
+        }));
     }
 }
