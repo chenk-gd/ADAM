@@ -162,6 +162,44 @@ impl AssetRepository for PostgresAssetRepository {
         Ok(())
     }
 
+    async fn update_publication(
+        &self,
+        id: &AssetId,
+        current_version: String,
+        publisher: String,
+        state: AssetState,
+    ) -> Result<(), RepositoryError> {
+        let state_str = match state {
+            AssetState::Clean => "clean",
+            AssetState::Dirty => "dirty",
+            AssetState::Archived => "archived",
+        };
+
+        let result = sqlx::query(
+            r#"
+            UPDATE asset_instances
+            SET current_version = $1,
+                publisher = $2,
+                current_state = $3,
+                updated_at = NOW()
+            WHERE id = $4
+            "#,
+        )
+        .bind(&current_version)
+        .bind(&publisher)
+        .bind(state_str)
+        .bind(id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        if result.rows_affected() == 0 {
+            return Err(RepositoryError::NotFound(id.0.to_string()));
+        }
+
+        Ok(())
+    }
+
     async fn find_by_project_id(
         &self,
         project_id: &ProjectId,

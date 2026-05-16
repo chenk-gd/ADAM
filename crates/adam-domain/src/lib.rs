@@ -18,10 +18,12 @@ pub use dependency::{
 };
 pub use repository::in_memory::{
     InMemoryAssetRepository, InMemoryAssetTypeRepository, InMemoryAssetVersionRepository,
-    InMemoryDependencyRepository, InMemoryDirtyQueueRepository, InMemoryVirtualInstanceRepository,
+    InMemoryDependencyRepository, InMemoryDirtyQueueRepository,
+    InMemoryDirtyResolutionLogRepository, InMemoryVirtualInstanceRepository,
 };
 pub use repository::{
-    AssetRepository, AssetTypeRepository, CreateAssetCommand, DependencyRepository,
-    DirtyQueueEntry, DirtyQueueRepository, RepositoryError, UpdateAssetCommand,
+    AssetDependencyRecord, AssetRepository, AssetTypeRepository, CreateAssetCommand,
+    DependencyRepository, DirtyQueueEntry, DirtyQueueRepository, DirtyResolutionLog,
+    DirtyResolutionLogRepository, EffectiveUpdateReason, RepositoryError, UpdateAssetCommand,
 };
 pub use virtual_instance::{VirtualInstance, VirtualInstanceId, VirtualInstanceRepository};

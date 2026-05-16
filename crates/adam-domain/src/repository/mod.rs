@@ -7,6 +7,7 @@ use crate::asset::instance::AssetTypeId;
 use crate::asset::instance::{AssetId, AssetInstance};
 use crate::asset::state::AssetState;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Errors that can occur in repository operations
@@ -67,6 +68,15 @@ pub trait AssetRepository: Send + Sync {
     /// Update asset state
     async fn update_state(&self, id: &AssetId, state: AssetState) -> Result<(), RepositoryError>;
 
+    /// Update fields changed by a successful publish operation
+    async fn update_publication(
+        &self,
+        id: &AssetId,
+        current_version: String,
+        publisher: String,
+        state: AssetState,
+    ) -> Result<(), RepositoryError>;
+
     /// Find assets by project ID
     async fn find_by_project_id(
         &self,
@@ -81,6 +91,40 @@ pub trait AssetRepository: Send + Sync {
 
     /// Delete asset by ID
     async fn delete(&self, id: &AssetId) -> Result<(), RepositoryError>;
+}
+
+/// Reason why the current effective dependency baseline was updated
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EffectiveUpdateReason {
+    /// Updated by a publish operation
+    Publish,
+    /// Updated by manual clean review
+    ManualClean,
+}
+
+impl EffectiveUpdateReason {
+    /// Stable storage representation
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EffectiveUpdateReason::Publish => "publish",
+            EffectiveUpdateReason::ManualClean => "manual_clean",
+        }
+    }
+}
+
+/// Full dependency record with declared and effective versions
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetDependencyRecord {
+    pub id: uuid::Uuid,
+    pub source_id: AssetId,
+    pub target_id: AssetId,
+    pub relationship: String,
+    pub declared_version: String,
+    pub effective_version: String,
+    pub effective_updated_by: String,
+    pub effective_updated_at: chrono::DateTime<chrono::Utc>,
+    pub effective_reason: EffectiveUpdateReason,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Entry in the dirty queue for tracking upstream changes
@@ -134,6 +178,79 @@ pub trait DependencyRepository: Send + Sync {
         source_id: &AssetId,
         target_id: &AssetId,
     ) -> Result<(), RepositoryError>;
+
+    /// Create or replace a rich dependency record
+    async fn create_dependency_record(
+        &self,
+        _record: &AssetDependencyRecord,
+    ) -> Result<(), RepositoryError> {
+        Err(RepositoryError::DatabaseError(
+            "create_dependency_record is not implemented".to_string(),
+        ))
+    }
+
+    /// Find rich downstream dependency records where `asset_id` is the upstream target
+    async fn find_downstream_dependencies(
+        &self,
+        _asset_id: &AssetId,
+    ) -> Result<Vec<AssetDependencyRecord>, RepositoryError> {
+        Err(RepositoryError::DatabaseError(
+            "find_downstream_dependencies is not implemented".to_string(),
+        ))
+    }
+
+    /// Find rich upstream dependency records where `asset_id` is the downstream source
+    async fn find_upstream_dependencies(
+        &self,
+        _asset_id: &AssetId,
+    ) -> Result<Vec<AssetDependencyRecord>, RepositoryError> {
+        Err(RepositoryError::DatabaseError(
+            "find_upstream_dependencies is not implemented".to_string(),
+        ))
+    }
+
+    /// Update only the current effective baseline for an existing dependency
+    async fn update_effective_version(
+        &self,
+        _source_id: &AssetId,
+        _target_id: &AssetId,
+        _effective_version: String,
+        _updated_by: String,
+        _reason: EffectiveUpdateReason,
+    ) -> Result<(), RepositoryError> {
+        Err(RepositoryError::DatabaseError(
+            "update_effective_version is not implemented".to_string(),
+        ))
+    }
+}
+
+/// Dirty resolution audit log
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirtyResolutionLog {
+    pub id: uuid::Uuid,
+    pub asset_id: AssetId,
+    pub asset_version: String,
+    pub upstream_asset_id: AssetId,
+    pub from_version: String,
+    pub to_version: String,
+    pub action: String,
+    pub review_result: String,
+    pub comment: Option<String>,
+    pub reviewed_by: String,
+    pub reviewed_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Repository trait for dirty resolution audit logs
+#[async_trait]
+pub trait DirtyResolutionLogRepository: Send + Sync {
+    /// Insert a dirty resolution log
+    async fn insert(&self, log: &DirtyResolutionLog) -> Result<(), RepositoryError>;
+
+    /// Find logs by asset ID
+    async fn find_by_asset(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Vec<DirtyResolutionLog>, RepositoryError>;
 }
 
 /// Repository trait for asset types

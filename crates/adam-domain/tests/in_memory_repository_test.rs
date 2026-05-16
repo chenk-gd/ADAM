@@ -2,12 +2,13 @@
 
 use adam_domain::asset::state::AssetState;
 use adam_domain::repository::{
-    AssetRepository, CreateAssetCommand, DependencyRepository, DirtyQueueEntry,
-    DirtyQueueRepository, RepositoryError,
+    AssetDependencyRecord, AssetRepository, CreateAssetCommand, DependencyRepository,
+    DirtyQueueEntry, DirtyQueueRepository, DirtyResolutionLog, DirtyResolutionLogRepository,
+    EffectiveUpdateReason, RepositoryError,
 };
 use adam_domain::{
     AssetId, AssetTypeId, InMemoryAssetRepository, InMemoryDependencyRepository,
-    InMemoryDirtyQueueRepository, OrganizationId, ProjectId,
+    InMemoryDirtyQueueRepository, InMemoryDirtyResolutionLogRepository, OrganizationId, ProjectId,
 };
 use chrono::Utc;
 
@@ -500,4 +501,136 @@ async fn dirty_queue_multiple_unresolved_same_upstream() {
 
     let unresolved2 = repo.find_unresolved_by_asset(&asset2).await.unwrap();
     assert_eq!(unresolved2.len(), 1);
+}
+
+#[tokio::test]
+async fn memory_repo_updates_publication_fields() {
+    let repo = InMemoryAssetRepository::new();
+    let org_id = OrganizationId::new();
+    let project_id = ProjectId::new();
+    let type_id = AssetTypeId::new();
+
+    let asset = repo
+        .create(&CreateAssetCommand {
+            name: "Publish Me".to_string(),
+            asset_type_id: type_id,
+            project_id: Some(project_id),
+            organization_id: org_id,
+            level: adam_domain::AssetLevel::Project,
+            external_ref: "https://example.com/asset/publish".to_string(),
+            source: "manual".to_string(),
+            metadata: serde_json::json!({}),
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+
+    repo.update_publication(
+        &asset.id,
+        "1.2.3".to_string(),
+        "alice".to_string(),
+        AssetState::Clean,
+    )
+    .await
+    .unwrap();
+
+    let updated = repo.find_by_id(&asset.id).await.unwrap().unwrap();
+    assert_eq!(updated.current_version(), Some(&"1.2.3".to_string()));
+    assert_eq!(updated.publisher(), Some(&"alice".to_string()));
+    assert_eq!(updated.state(), AssetState::Clean);
+}
+
+#[tokio::test]
+async fn dependency_repo_updates_effective_baseline() {
+    let repo = InMemoryDependencyRepository::new();
+    let source = AssetId::new();
+    let target = AssetId::new();
+
+    repo.create_dependency_record(&AssetDependencyRecord {
+        id: uuid::Uuid::new_v4(),
+        source_id: source,
+        target_id: target,
+        relationship: "depends_on".to_string(),
+        declared_version: "1.0.0".to_string(),
+        effective_version: "1.0.0".to_string(),
+        effective_updated_by: "alice".to_string(),
+        effective_updated_at: Utc::now(),
+        effective_reason: EffectiveUpdateReason::Publish,
+        created_at: Utc::now(),
+    })
+    .await
+    .unwrap();
+
+    repo.update_effective_version(
+        &source,
+        &target,
+        "1.1.0".to_string(),
+        "bob".to_string(),
+        EffectiveUpdateReason::ManualClean,
+    )
+    .await
+    .unwrap();
+
+    let upstream = repo.find_upstream_dependencies(&source).await.unwrap();
+    assert_eq!(upstream.len(), 1);
+    assert_eq!(upstream[0].declared_version, "1.0.0");
+    assert_eq!(upstream[0].effective_version, "1.1.0");
+    assert_eq!(upstream[0].effective_updated_by, "bob");
+    assert_eq!(upstream[0].effective_reason, EffectiveUpdateReason::ManualClean);
+}
+
+#[tokio::test]
+async fn dirty_resolution_log_repo_inserts_and_lists_logs() {
+    let repo = InMemoryDirtyResolutionLogRepository::new();
+    let asset_id = AssetId::new();
+    let upstream_id = AssetId::new();
+
+    let log = DirtyResolutionLog {
+        id: uuid::Uuid::new_v4(),
+        asset_id,
+        asset_version: "1.0.0".to_string(),
+        upstream_asset_id: upstream_id,
+        from_version: "1.0.0".to_string(),
+        to_version: "1.1.0".to_string(),
+        action: "manual_clean".to_string(),
+        review_result: "no_impact".to_string(),
+        comment: Some("reviewed".to_string()),
+        reviewed_by: "alice".to_string(),
+        reviewed_at: Utc::now(),
+    };
+
+    repo.insert(&log).await.unwrap();
+
+    let logs = repo.find_by_asset(&asset_id).await.unwrap();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].upstream_asset_id, upstream_id);
+    assert_eq!(logs[0].to_version, "1.1.0");
+}
+
+#[tokio::test]
+async fn dependency_repo_downstream_records_include_effective_version() {
+    let repo = InMemoryDependencyRepository::new();
+    let downstream = AssetId::new();
+    let upstream = AssetId::new();
+
+    repo.create_dependency_record(&AssetDependencyRecord {
+        id: uuid::Uuid::new_v4(),
+        source_id: downstream,
+        target_id: upstream,
+        relationship: "depends_on".to_string(),
+        declared_version: "1.0.0".to_string(),
+        effective_version: "1.0.1".to_string(),
+        effective_updated_by: "alice".to_string(),
+        effective_updated_at: Utc::now(),
+        effective_reason: EffectiveUpdateReason::ManualClean,
+        created_at: Utc::now(),
+    })
+    .await
+    .unwrap();
+
+    let records = repo.find_downstream_dependencies(&upstream).await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].source_id, downstream);
+    assert_eq!(records[0].target_id, upstream);
+    assert_eq!(records[0].effective_version, "1.0.1");
 }

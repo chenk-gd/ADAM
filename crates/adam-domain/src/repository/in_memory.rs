@@ -5,7 +5,8 @@ use crate::asset::instance::{AssetId, AssetInstance, AssetTypeId};
 use crate::asset::state::AssetState;
 use crate::asset::version::{AssetVersion, AssetVersionId, AssetVersionRepository};
 use crate::repository::{
-    AssetRepository, AssetTypeRepository, CreateAssetCommand, DependencyRepository,
+    AssetDependencyRecord, AssetRepository, AssetTypeRepository, CreateAssetCommand,
+    DependencyRepository, DirtyResolutionLog, DirtyResolutionLogRepository, EffectiveUpdateReason,
     RepositoryError, UpdateAssetCommand,
 };
 use crate::{
@@ -108,6 +109,35 @@ impl AssetRepository for InMemoryAssetRepository {
                     asset.current_state, state
                 )));
             }
+            asset.current_state = state;
+            asset.updated_at = Utc::now();
+            Ok(())
+        } else {
+            Err(RepositoryError::NotFound(format!("{id:?}")))
+        }
+    }
+
+    async fn update_publication(
+        &self,
+        id: &AssetId,
+        current_version: String,
+        publisher: String,
+        state: AssetState,
+    ) -> Result<(), RepositoryError> {
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+
+        if let Some(asset) = data.get_mut(id) {
+            if !asset.current_state.can_transition_to(state) {
+                return Err(RepositoryError::InvalidStateTransition(format!(
+                    "Cannot transition from {:?} to {:?}",
+                    asset.current_state, state
+                )));
+            }
+            asset.current_version = Some(current_version);
+            asset.publisher = Some(publisher);
             asset.current_state = state;
             asset.updated_at = Utc::now();
             Ok(())
@@ -435,6 +465,8 @@ pub struct InMemoryDependencyRepository {
     upstream: Mutex<HashMap<AssetId, Vec<AssetId>>>,
     /// Stores downstream dependencies: asset_id -> list of assets that depend on it
     downstream: Mutex<HashMap<AssetId, Vec<AssetId>>>,
+    /// Full dependency records keyed by (source, target)
+    records: Mutex<HashMap<(AssetId, AssetId), AssetDependencyRecord>>,
 }
 
 impl InMemoryDependencyRepository {
@@ -443,6 +475,7 @@ impl InMemoryDependencyRepository {
         Self {
             upstream: Mutex::new(HashMap::new()),
             downstream: Mutex::new(HashMap::new()),
+            records: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -474,18 +507,145 @@ impl DependencyRepository for InMemoryDependencyRepository {
         source_id: &AssetId,
         target_id: &AssetId,
     ) -> Result<(), RepositoryError> {
+        let now = Utc::now();
+        let record = AssetDependencyRecord {
+            id: uuid::Uuid::new_v4(),
+            source_id: *source_id,
+            target_id: *target_id,
+            relationship: "depends_on".to_string(),
+            declared_version: "0.0.0".to_string(),
+            effective_version: "0.0.0".to_string(),
+            effective_updated_by: "system".to_string(),
+            effective_updated_at: now,
+            effective_reason: EffectiveUpdateReason::Publish,
+            created_at: now,
+        };
+        self.create_dependency_record(&record).await
+    }
+
+    async fn create_dependency_record(
+        &self,
+        record: &AssetDependencyRecord,
+    ) -> Result<(), RepositoryError> {
         // source depends on target (source -> target)
         let mut upstream = self.upstream.lock().map_err(|_| {
             RepositoryError::DatabaseError("Failed to lock upstream map".to_string())
         })?;
-        upstream.entry(*source_id).or_default().push(*target_id);
+        let upstreams = upstream.entry(record.source_id).or_default();
+        if !upstreams.contains(&record.target_id) {
+            upstreams.push(record.target_id);
+        }
 
         let mut downstream = self.downstream.lock().map_err(|_| {
             RepositoryError::DatabaseError("Failed to lock downstream map".to_string())
         })?;
-        downstream.entry(*target_id).or_default().push(*source_id);
+        let downstreams = downstream.entry(record.target_id).or_default();
+        if !downstreams.contains(&record.source_id) {
+            downstreams.push(record.source_id);
+        }
+
+        let mut records = self.records.lock().map_err(|_| {
+            RepositoryError::DatabaseError("Failed to lock dependency records map".to_string())
+        })?;
+        records.insert((record.source_id, record.target_id), record.clone());
 
         Ok(())
+    }
+
+    async fn find_downstream_dependencies(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Vec<AssetDependencyRecord>, RepositoryError> {
+        let records = self.records.lock().map_err(|_| {
+            RepositoryError::DatabaseError("Failed to lock dependency records map".to_string())
+        })?;
+        Ok(records
+            .values()
+            .filter(|record| record.target_id == *asset_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_upstream_dependencies(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Vec<AssetDependencyRecord>, RepositoryError> {
+        let records = self.records.lock().map_err(|_| {
+            RepositoryError::DatabaseError("Failed to lock dependency records map".to_string())
+        })?;
+        Ok(records
+            .values()
+            .filter(|record| record.source_id == *asset_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn update_effective_version(
+        &self,
+        source_id: &AssetId,
+        target_id: &AssetId,
+        effective_version: String,
+        updated_by: String,
+        reason: EffectiveUpdateReason,
+    ) -> Result<(), RepositoryError> {
+        let mut records = self.records.lock().map_err(|_| {
+            RepositoryError::DatabaseError("Failed to lock dependency records map".to_string())
+        })?;
+        let record = records
+            .get_mut(&(*source_id, *target_id))
+            .ok_or_else(|| RepositoryError::NotFound(format!("{source_id:?}->{target_id:?}")))?;
+        record.effective_version = effective_version;
+        record.effective_updated_by = updated_by;
+        record.effective_updated_at = Utc::now();
+        record.effective_reason = reason;
+        Ok(())
+    }
+}
+
+/// In-memory dirty resolution log repository for testing
+pub struct InMemoryDirtyResolutionLogRepository {
+    data: Mutex<Vec<DirtyResolutionLog>>,
+}
+
+impl InMemoryDirtyResolutionLogRepository {
+    /// Create a new empty repository
+    pub fn new() -> Self {
+        Self {
+            data: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl Default for InMemoryDirtyResolutionLogRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl DirtyResolutionLogRepository for InMemoryDirtyResolutionLogRepository {
+    async fn insert(&self, log: &DirtyResolutionLog) -> Result<(), RepositoryError> {
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        data.push(log.clone());
+        Ok(())
+    }
+
+    async fn find_by_asset(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Vec<DirtyResolutionLog>, RepositoryError> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        Ok(data
+            .iter()
+            .filter(|log| log.asset_id == *asset_id)
+            .cloned()
+            .collect())
     }
 }
 
