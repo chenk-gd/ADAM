@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use adam_adapters::mcp::{AdanMcpServer, McpServerState};
+use adam_adapters::mcp::{AdamMcpServer, McpServerState};
 use adam_adapters::rest::{self, AppState};
 use adam_domain::{AuthPrincipal, OrganizationId, ProjectId, Role};
 
@@ -14,7 +14,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize repositories
     let asset_repo = Arc::new(adam_domain::InMemoryAssetRepository::new());
     let asset_type_repo = Arc::new(adam_domain::InMemoryAssetTypeRepository::new());
-    let dependency_repo = Arc::new(adam_infrastructure::repositories::InMemoryDependencyRepository::new());
+    let dependency_repo = Arc::new(adam_domain::InMemoryDependencyRepository::new());
     let dirty_repo = Arc::new(adam_domain::InMemoryDirtyQueueRepository::new());
     let virtual_repo = Arc::new(adam_domain::InMemoryVirtualInstanceRepository::new());
 
@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Create MCP server
-    let mcp_server = AdanMcpServer::new(mcp_state);
+    let mcp_server = AdamMcpServer::new(mcp_state);
 
     // Start REST API server
     let rest_addr: SocketAddr = "0.0.0.0:3000".parse().expect("valid address");
@@ -80,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_mcp_server(server: AdanMcpServer) -> anyhow::Result<()> {
+async fn run_mcp_server(server: AdamMcpServer) -> anyhow::Result<()> {
     use rmcp::service::ServiceExt;
 
     let service = server.serve(rmcp::transport::stdio()).await?;

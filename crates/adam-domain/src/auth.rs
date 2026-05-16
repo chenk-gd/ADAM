@@ -31,7 +31,11 @@ impl AuthPrincipal {
 
     /// Check if principal has permission for a specific project
     /// OrgAdmin and SystemAdmin can bypass project membership checks within their org
-    pub fn has_permission_for_project(&self, permission: Permission, project_id: &ProjectId) -> bool {
+    pub fn has_permission_for_project(
+        &self,
+        permission: Permission,
+        project_id: &ProjectId,
+    ) -> bool {
         // First check if has the permission
         if !self.has_permission(permission) {
             return false;
@@ -266,70 +270,24 @@ pub struct AuthorizationService;
 
 impl AuthorizationService {
     /// Check if principal has permission for resource
+    /// Delegates to AuthPrincipal::can() to avoid duplication
     pub fn check(
         principal: &AuthPrincipal,
         permission: Permission,
         resource_org: OrganizationId,
         resource_project: Option<ProjectId>,
     ) -> Result<(), AuthorizationError> {
-        // 1. Organization boundary check
-        if principal.organization_id != resource_org {
-            return Err(AuthorizationError::CrossOrganizationAccessDenied);
-        }
-
-        // 2. Permission check
-        let has_permission = principal
-            .roles
-            .iter()
-            .any(|role| role.permissions().contains(&permission));
-
-        if !has_permission {
-            return Err(AuthorizationError::PermissionDenied {
-                required: permission,
-            });
-        }
-
-        // 3. Project membership check for project-level resources
-        // OrgAdmin and SystemAdmin can bypass project membership checks within their org
-        let is_org_admin = principal
-            .roles
-            .iter()
-            .any(|r| matches!(r, Role::OrgAdmin | Role::SystemAdmin));
-
-        if let Some(project_id) = resource_project {
-            if !is_org_admin && !principal.project_memberships.contains(&project_id) {
-                return Err(AuthorizationError::ProjectAccessDenied(project_id));
-            }
-        }
-
-        Ok(())
+        principal.can(permission, resource_org, resource_project)
     }
 
     /// Check if principal can access specific asset
+    /// Delegates to AuthPrincipal::can() with AssetRead permission
     pub fn check_asset_access(
         principal: &AuthPrincipal,
         asset_org: OrganizationId,
         asset_project: Option<ProjectId>,
     ) -> Result<(), AuthorizationError> {
-        // Organization boundary
-        if principal.organization_id != asset_org {
-            return Err(AuthorizationError::CrossOrganizationAccessDenied);
-        }
-
-        // Project membership for project-level assets
-        // OrgAdmin and SystemAdmin can bypass within their organization
-        let is_org_admin = principal
-            .roles
-            .iter()
-            .any(|r| matches!(r, Role::OrgAdmin | Role::SystemAdmin));
-
-        if let Some(project_id) = asset_project {
-            if !is_org_admin && !principal.project_memberships.contains(&project_id) {
-                return Err(AuthorizationError::ProjectAccessDenied(project_id));
-            }
-        }
-
-        Ok(())
+        principal.can(Permission::AssetRead, asset_org, asset_project)
     }
 }
 
@@ -411,22 +369,26 @@ mod tests {
         };
 
         // SystemAdmin can access any project in same org
-        assert!(principal
-            .can(
-                Permission::AssetCreate,
-                org_id.clone(),
-                Some(ProjectId::new())
-            )
-            .is_ok());
+        assert!(
+            principal
+                .can(
+                    Permission::AssetCreate,
+                    org_id.clone(),
+                    Some(ProjectId::new())
+                )
+                .is_ok()
+        );
 
         // SystemAdmin can delete assets
-        assert!(principal
-            .can(
-                Permission::AssetDelete,
-                org_id.clone(),
-                Some(ProjectId::new())
-            )
-            .is_ok());
+        assert!(
+            principal
+                .can(
+                    Permission::AssetDelete,
+                    org_id.clone(),
+                    Some(ProjectId::new())
+                )
+                .is_ok()
+        );
     }
 
     #[test]

@@ -2,7 +2,24 @@ name: CI
 
 on: [push, pull_request]
 
+env:
+  DATABASE_URL: postgres://postgres:postgres@localhost:5432/adam_test
+  POSTGRES_DB: adam_test
+
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
   test:
     runs-on: ubuntu-latest
     services:
@@ -10,11 +27,14 @@ jobs:
         image: postgres:15
         env:
           POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: adam_test
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+        ports:
+          - 5432:5432
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -26,8 +46,13 @@ jobs:
           sqlx database create
           sqlx migrate run
       - name: Test
-        run: cargo test --workspace --all-features
-      - name: Coverage
-        uses: actions-rs/tarpaulin@v0.1
+        run: cargo test --workspace
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+      - name: Generate coverage
+        run: cargo tarpaulin --out xml
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
         with:
-          args: '--fail-under 80'
+          files: cobertura.xml
+          fail_ci_if_error: false

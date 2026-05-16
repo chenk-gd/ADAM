@@ -30,7 +30,11 @@ pub struct SemVer {
 
 impl SemVer {
     pub fn new(major: u64, minor: u64, patch: u64) -> Self {
-        Self { major, minor, patch }
+        Self {
+            major,
+            minor,
+            patch,
+        }
     }
 
     pub fn parse(version: &str) -> Result<Self, String> {
@@ -45,11 +49,39 @@ impl SemVer {
             patch: parts[2].parse::<u64>().map_err(|e| e.to_string())?,
         })
     }
+
+    /// Get next major version (resets minor and patch to 0)
+    pub fn next_major(&self) -> Self {
+        Self {
+            major: self.major + 1,
+            minor: 0,
+            patch: 0,
+        }
+    }
+
+    /// Get next minor version (resets patch to 0)
+    pub fn next_minor(&self) -> Self {
+        Self {
+            major: self.major,
+            minor: self.minor + 1,
+            patch: 0,
+        }
+    }
+
+    /// Get next patch version
+    pub fn next_patch(&self) -> Self {
+        Self {
+            major: self.major,
+            minor: self.minor,
+            patch: self.patch + 1,
+        }
+    }
 }
 
 impl std::fmt::Display for SemVer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "v{}.{}.{}", self.major, self.minor, self.patch)
+        // Use normalized format (without "v" prefix) for consistent storage
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
     }
 }
 
@@ -131,7 +163,7 @@ mod tests {
     #[test]
     fn test_semver_parse_and_display() {
         let semver = SemVer::new(1, 2, 3);
-        assert_eq!(semver.to_string(), "v1.2.3");
+        assert_eq!(semver.to_string(), "1.2.3");
 
         let parsed = SemVer::parse("v1.2.3").unwrap();
         assert_eq!(parsed.major, 1);

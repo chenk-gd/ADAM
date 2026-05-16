@@ -101,12 +101,7 @@ mod tests {
         let source_id = AssetTypeId::new();
         let target_id = AssetTypeId::new();
 
-        let rule = DependencyRule::new(
-            source_id,
-            target_id,
-            RelationshipType::DependsOn,
-            true,
-        );
+        let rule = DependencyRule::new(source_id, target_id, RelationshipType::DependsOn, true);
 
         assert_eq!(rule.source_type_id, source_id);
         assert_eq!(rule.target_type_id, target_id);
@@ -119,12 +114,7 @@ mod tests {
         let source_id = AssetTypeId::new();
         let target_id = AssetTypeId::new();
 
-        let rule = DependencyRule::new(
-            source_id,
-            target_id,
-            RelationshipType::DependsOn,
-            false,
-        );
+        let rule = DependencyRule::new(source_id, target_id, RelationshipType::DependsOn, false);
 
         assert!(rule.matches(&source_id, &target_id));
         assert!(!rule.matches(&target_id, &source_id));

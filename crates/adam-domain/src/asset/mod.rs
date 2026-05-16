@@ -7,4 +7,6 @@ pub mod version;
 
 pub use asset_type::AssetType;
 pub use instance::{AssetId, AssetInstance, AssetTypeId, OrganizationId, ProjectId};
-pub use version::{AssetVersion, AssetVersionId, AssetVersionRepository, DependencySnapshot, SemVer};
+pub use version::{
+    AssetVersion, AssetVersionId, AssetVersionRepository, DependencySnapshot, SemVer,
+};

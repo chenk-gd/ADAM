@@ -3,6 +3,26 @@
 //! Defines the lifecycle states for assets and their valid transitions.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Errors that can occur in state operations
+#[derive(Debug, Error, Clone, PartialEq)]
+pub enum StateError {
+    /// Invalid state transition
+    #[error("Invalid state transition: cannot transition from {from} to {to}")]
+    InvalidTransition {
+        /// Current state
+        from: AssetState,
+        /// Target state
+        to: AssetState,
+    },
+    /// Operation not allowed in current state
+    #[error("Operation not allowed in state {state}")]
+    OperationNotAllowed {
+        /// Current state
+        state: AssetState,
+    },
+}
 
 /// Asset lifecycle states
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -35,6 +55,30 @@ impl AssetState {
         }
     }
 
+    /// Validate transition and return error if invalid
+    pub fn validate_transition(&self, target: AssetState) -> Result<(), StateError> {
+        if self.can_transition_to(target) {
+            Ok(())
+        } else {
+            Err(StateError::InvalidTransition {
+                from: *self,
+                to: target,
+            })
+        }
+    }
+
+    /// Check if the asset can be published
+    /// Publishing is allowed for Clean and Dirty states
+    pub fn can_publish(&self) -> bool {
+        matches!(self, AssetState::Clean | AssetState::Dirty)
+    }
+
+    /// Check if the asset can be depended upon
+    /// Archived assets cannot be depended upon
+    pub fn can_depend(&self) -> bool {
+        !self.is_archived()
+    }
+
     /// Check if the asset is in Dirty state
     pub fn is_dirty(&self) -> bool {
         matches!(self, AssetState::Dirty)
@@ -43,6 +87,16 @@ impl AssetState {
     /// Check if the asset is Archived
     pub fn is_archived(&self) -> bool {
         matches!(self, AssetState::Archived)
+    }
+}
+
+impl std::fmt::Display for AssetState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AssetState::Clean => write!(f, "Clean"),
+            AssetState::Dirty => write!(f, "Dirty"),
+            AssetState::Archived => write!(f, "Archived"),
+        }
     }
 }
 
@@ -73,5 +127,61 @@ mod tests {
         assert!(AssetState::Dirty.can_transition_to(AssetState::Dirty));
         // Archived is terminal - no transitions allowed, including self
         assert!(!AssetState::Archived.can_transition_to(AssetState::Archived));
+    }
+
+    #[test]
+    fn test_can_publish() {
+        assert!(AssetState::Clean.can_publish());
+        assert!(AssetState::Dirty.can_publish());
+        assert!(!AssetState::Archived.can_publish());
+    }
+
+    #[test]
+    fn test_can_depend() {
+        assert!(AssetState::Clean.can_depend());
+        assert!(AssetState::Dirty.can_depend());
+        assert!(!AssetState::Archived.can_depend());
+    }
+
+    #[test]
+    fn test_validate_transition_success() {
+        assert!(
+            AssetState::Clean
+                .validate_transition(AssetState::Dirty)
+                .is_ok()
+        );
+        assert!(
+            AssetState::Dirty
+                .validate_transition(AssetState::Clean)
+                .is_ok()
+        );
+        assert!(
+            AssetState::Clean
+                .validate_transition(AssetState::Clean)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_transition_failure() {
+        let result = AssetState::Archived.validate_transition(AssetState::Clean);
+        assert!(result.is_err());
+        match result {
+            Err(StateError::InvalidTransition { from, to }) => {
+                assert_eq!(from, AssetState::Archived);
+                assert_eq!(to, AssetState::Clean);
+            }
+            _ => panic!("Expected InvalidTransition error"),
+        }
+    }
+
+    #[test]
+    fn test_state_error_display() {
+        let error = StateError::InvalidTransition {
+            from: AssetState::Archived,
+            to: AssetState::Clean,
+        };
+        assert!(error.to_string().contains("Archived"));
+        assert!(error.to_string().contains("Clean"));
     }
 }

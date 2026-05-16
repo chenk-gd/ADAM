@@ -2,4 +2,7 @@
 
 pub mod services;
 
-pub use services::state_propagator::{StatePropagationError, StatePropagator};
+pub use services::{
+    AssetService, AssetServiceError, ChangeType, StatePropagationError, StatePropagator,
+    VersionService, VersionServiceError,
+};

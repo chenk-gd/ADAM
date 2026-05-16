@@ -6,13 +6,13 @@ use async_trait::async_trait;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use adam_domain::{
-    AssetId, AssetInstance, AssetRepository, CreateAssetCommand, OrganizationId, ProjectId,
-    RepositoryError,
-};
 use adam_domain::asset::instance::AssetTypeId;
 use adam_domain::asset::state::AssetState;
 use adam_domain::dependency::boundary::AssetLevel;
+use adam_domain::{
+    AssetId, AssetInstance, AssetRepository, CreateAssetCommand, OrganizationId, ProjectId,
+    RepositoryError, UpdateAssetCommand,
+};
 
 /// PostgreSQL implementation of AssetRepository
 pub struct PostgresAssetRepository {
@@ -54,21 +54,23 @@ impl AssetRepository for PostgresAssetRepository {
                 metadata, assignees, idempotency_key, created_at, updated_at
             )
             VALUES (
-                $1, $2, $3, $4, $5, 'manual',
-                $6, $7, '0.1.0', $8,
-                '{}', '[]', $9, $10, $11
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, NULL, $9,
+                $10, '[]', $11, $12, $13
             )
             RETURNING id
-            "#
+            "#,
         )
         .bind(asset_id.0)
         .bind(cmd.asset_type_id.0)
         .bind(cmd.organization_id.0)
         .bind(&cmd.name)
-        .bind(format!("manual: {}", cmd.name)) // external_ref
+        .bind(&cmd.external_ref)
+        .bind(&cmd.source)
         .bind(level_str)
         .bind(cmd.project_id.map(|p| p.0))
         .bind(state_str)
+        .bind(&cmd.metadata)
         .bind(&cmd.idempotency_key)
         .bind(now)
         .bind(now)
@@ -78,30 +80,30 @@ impl AssetRepository for PostgresAssetRepository {
         match result {
             Ok(row) => {
                 let id: Uuid = row.get("id");
-                Ok(AssetInstance {
-                    id: AssetId::from_uuid(id),
-                    name: cmd.name.clone(),
-                    asset_type_id: cmd.asset_type_id,
-                    project_id: cmd.project_id,
-                    organization_id: cmd.organization_id,
-                    level: cmd.level,
-                    current_state: AssetState::Clean,
-                    external_ref: cmd.external_ref.clone(),
-                    source: cmd.source.clone(),
-                    metadata: cmd.metadata.clone(),
-                    assignees: vec![],
-                    publisher: None,
-                    current_version: None,
-                    created_at: now,
-                    updated_at: now,
-                    idempotency_key: cmd.idempotency_key.clone(),
-                })
+                Ok(AssetInstance::new_with_fields(
+                    AssetId::from_uuid(id),
+                    cmd.name.clone(),
+                    cmd.asset_type_id,
+                    cmd.project_id,
+                    cmd.organization_id,
+                    cmd.level,
+                    AssetState::Clean,
+                    cmd.external_ref.clone(),
+                    cmd.source.clone(),
+                    cmd.metadata.clone(),
+                    vec![],
+                    None,
+                    None,
+                    now,
+                    now,
+                    cmd.idempotency_key.clone(),
+                ))
             }
             Err(sqlx::Error::Database(db_err)) => {
                 if let Some(constraint) = db_err.constraint() {
                     if constraint.contains("idempotency") {
                         return Err(RepositoryError::DuplicateIdempotencyKey(
-                            cmd.idempotency_key.clone().unwrap_or_default()
+                            cmd.idempotency_key.clone().unwrap_or_default(),
                         ));
                     }
                 }
@@ -116,10 +118,11 @@ impl AssetRepository for PostgresAssetRepository {
             r#"
             SELECT
                 id, name, type_id, organization_id, level, project_id,
-                current_state, created_at, updated_at, idempotency_key
+                current_state, created_at, updated_at, idempotency_key,
+                external_ref, source, metadata, assignees, publisher, current_version
             FROM asset_instances
             WHERE id = $1
-            "#
+            "#,
         )
         .bind(id.0)
         .fetch_optional(&self.pool)
@@ -144,7 +147,7 @@ impl AssetRepository for PostgresAssetRepository {
             UPDATE asset_instances
             SET current_state = $1, updated_at = NOW()
             WHERE id = $2
-            "#
+            "#,
         )
         .bind(state_str)
         .bind(id.0)
@@ -167,20 +170,19 @@ impl AssetRepository for PostgresAssetRepository {
             r#"
             SELECT
                 id, name, type_id, organization_id, level, project_id,
-                current_state, created_at, updated_at, idempotency_key
+                current_state, created_at, updated_at, idempotency_key,
+                external_ref, source, metadata, assignees, publisher, current_version
             FROM asset_instances
             WHERE project_id = $1
             ORDER BY name
-            "#
+            "#,
         )
         .bind(project_id.0)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
 
-        rows.iter()
-            .map(|row| self.row_to_asset(row))
-            .collect()
+        rows.iter().map(|row| self.row_to_asset(row)).collect()
     }
 
     async fn find_by_organization_id(
@@ -191,66 +193,190 @@ impl AssetRepository for PostgresAssetRepository {
             r#"
             SELECT
                 id, name, type_id, organization_id, level, project_id,
-                current_state, created_at, updated_at, idempotency_key
+                current_state, created_at, updated_at, idempotency_key,
+                external_ref, source, metadata, assignees, publisher, current_version
             FROM asset_instances
             WHERE organization_id = $1
             ORDER BY name
-            "#
+            "#,
         )
         .bind(org_id.0)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
 
-        rows.iter()
-            .map(|row| self.row_to_asset(row))
-            .collect()
+        rows.iter().map(|row| self.row_to_asset(row)).collect()
+    }
+
+    async fn update(
+        &self,
+        id: &AssetId,
+        cmd: &UpdateAssetCommand,
+    ) -> Result<AssetInstance, RepositoryError> {
+        // First get the existing asset
+        let asset = self
+            .find_by_id(id)
+            .await?
+            .ok_or_else(|| RepositoryError::NotFound(id.0.to_string()))?;
+
+        // Build dynamic SQL based on which fields are provided
+        let mut updates = vec![];
+        let mut bind_idx = 1;
+
+        if cmd.name.is_some() {
+            updates.push(format!("name = ${bind_idx}"));
+            bind_idx += 1;
+        }
+        if cmd.assignees.is_some() {
+            updates.push(format!("assignees = ${bind_idx}::jsonb"));
+            bind_idx += 1;
+        }
+        if cmd.metadata.is_some() {
+            updates.push(format!("metadata = ${bind_idx}::jsonb"));
+            bind_idx += 1;
+        }
+        // Always update updated_at
+        updates.push(format!("updated_at = ${bind_idx}"));
+        bind_idx += 1;
+
+        if updates.is_empty() {
+            return Ok(asset);
+        }
+
+        let sql = format!(
+            "UPDATE asset_instances SET {} WHERE id = ${} RETURNING *",
+            updates.join(", "),
+            bind_idx
+        );
+
+        let mut query = sqlx::query(&sql);
+
+        // Bind values
+        if let Some(name) = &cmd.name {
+            query = query.bind(name);
+        }
+        if let Some(assignees) = &cmd.assignees {
+            query = query.bind(serde_json::to_value(assignees).unwrap_or_default());
+        }
+        if let Some(metadata) = &cmd.metadata {
+            query = query.bind(metadata);
+        }
+        query = query.bind(chrono::Utc::now());
+        query = query.bind(id.0);
+
+        let row = query
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        self.row_to_asset(&row)
+    }
+
+    async fn delete(&self, id: &AssetId) -> Result<(), RepositoryError> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM asset_instances
+            WHERE id = $1
+            "#,
+        )
+        .bind(id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        if result.rows_affected() == 0 {
+            return Err(RepositoryError::NotFound(id.0.to_string()));
+        }
+
+        Ok(())
     }
 }
 
 impl PostgresAssetRepository {
     /// Convert a database row to an AssetInstance
     fn row_to_asset(&self, row: &sqlx::postgres::PgRow) -> Result<AssetInstance, RepositoryError> {
-        let level_str: String = row.try_get("level")
+        let level_str: String = row
+            .try_get("level")
             .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
-        let state_str: String = row.try_get("current_state")
+        let state_str: String = row
+            .try_get("current_state")
             .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
 
-        // Get optional new fields with defaults
-        let external_ref: String = row.try_get::<String, _>("external_ref")
-            .unwrap_or_default();
-        let source: String = row.try_get::<String, _>("source")
-            .unwrap_or_else(|_| "manual".to_string());
-        let metadata: serde_json::Value = row.try_get::<serde_json::Value, _>("metadata")
-            .unwrap_or_else(|_| serde_json::json!({}));
-        let assignees: Vec<String> = row.try_get::<Vec<String>, _>("assignees")
-            .unwrap_or_default();
-        let publisher: Option<String> = row.try_get::<Option<String>, _>("publisher").ok().flatten();
-        let current_version: Option<String> = row.try_get::<Option<String>, _>("current_version").ok().flatten();
+        // Required fields - use try_get with map_err
+        let external_ref: String = row
+            .try_get::<String, _>("external_ref")
+            .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+        let source: String = row
+            .try_get::<String, _>("source")
+            .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+        let metadata: serde_json::Value = row
+            .try_get::<serde_json::Value, _>("metadata")
+            .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+        let assignees: Vec<String> = row
+            .try_get::<serde_json::Value, _>("assignees")
+            .map_err(|e| RepositoryError::DatabaseError(e.to_string()))
+            .and_then(|v| {
+                serde_json::from_value(v).map_err(|e| {
+                    RepositoryError::DatabaseError(format!("Failed to parse assignees: {e}"))
+                })
+            })?;
 
-        Ok(AssetInstance {
-            id: AssetId::from_uuid(row.try_get::<Uuid, _>("id")
-                .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?),
-            name: row.try_get::<String, _>("name")
+        // Optional fields - use ok().flatten() or unwrap_or_default
+        let publisher: Option<String> =
+            row.try_get::<Option<String>, _>("publisher").ok().flatten();
+        let current_version: Option<String> = row
+            .try_get::<Option<String>, _>("current_version")
+            .ok()
+            .flatten();
+
+        let created_at: chrono::DateTime<chrono::Utc> = row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+            .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+        let updated_at: chrono::DateTime<chrono::Utc> = row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
+            .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+        let idempotency_key: Option<String> = row
+            .try_get::<Option<String>, _>("idempotency_key")
+            .ok()
+            .flatten();
+
+        Ok(AssetInstance::new_with_fields(
+            AssetId::from_uuid(
+                row.try_get::<Uuid, _>("id")
+                    .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?,
+            ),
+            row.try_get::<String, _>("name")
                 .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?,
-            asset_type_id: AssetTypeId::from_uuid(row.try_get::<Uuid, _>("type_id")
-                .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?),
-            project_id: row.try_get::<Option<Uuid>, _>("project_id")
+            AssetTypeId::from_uuid(
+                row.try_get::<Uuid, _>("type_id")
+                    .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?,
+            ),
+            row.try_get::<Option<Uuid>, _>("project_id")
                 .ok()
                 .flatten()
                 .map(ProjectId::from_uuid),
-            organization_id: OrganizationId::from_uuid(row.try_get::<Uuid, _>("organization_id")
-                .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?),
-            level: match level_str.as_str() {
+            OrganizationId::from_uuid(
+                row.try_get::<Uuid, _>("organization_id")
+                    .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?,
+            ),
+            match level_str.as_str() {
                 "project" => AssetLevel::Project,
                 "organization" => AssetLevel::Organization,
-                _ => return Err(RepositoryError::DatabaseError(format!("Invalid level: {level_str}"))),
+                _ => {
+                    return Err(RepositoryError::DatabaseError(format!(
+                        "Invalid level: {level_str}"
+                    )));
+                }
             },
-            current_state: match state_str.as_str() {
+            match state_str.as_str() {
                 "clean" => AssetState::Clean,
                 "dirty" => AssetState::Dirty,
                 "archived" => AssetState::Archived,
-                _ => return Err(RepositoryError::DatabaseError(format!("Invalid state: {state_str}"))),
+                _ => {
+                    return Err(RepositoryError::DatabaseError(format!(
+                        "Invalid state: {state_str}"
+                    )));
+                }
             },
             external_ref,
             source,
@@ -258,12 +384,10 @@ impl PostgresAssetRepository {
             assignees,
             publisher,
             current_version,
-            created_at: row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
-                .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?,
-            updated_at: row.try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
-                .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?,
-            idempotency_key: row.try_get::<Option<String>, _>("idempotency_key").ok().flatten(),
-        })
+            created_at,
+            updated_at,
+            idempotency_key,
+        ))
     }
 }
 
@@ -289,22 +413,28 @@ impl adam_domain::DirtyQueueRepository for PostgresDirtyQueueRepository {
             r#"
             INSERT INTO dirty_queue (
                 id, asset_id, upstream_asset_id, upstream_version, upstream_old_version,
-                impact_level, resolved, idempotency_key, created_at, updated_at
+                impact_level, since, resolved, idempotency_key, created_at, updated_at
             )
             VALUES (
-                $1, $2, $3, $4, '0.0.0',
-                'medium', false, $5, $6, $6
+                $1, $2, $3, $4, $5,
+                $6, $7, false, $8, $9, $9
             )
             ON CONFLICT (asset_id, upstream_asset_id) WHERE resolved = false
             DO UPDATE SET
                 upstream_version = EXCLUDED.upstream_version,
+                upstream_old_version = EXCLUDED.upstream_old_version,
+                impact_level = EXCLUDED.impact_level,
+                since = EXCLUDED.since,
                 updated_at = EXCLUDED.updated_at
-            "#
+            "#,
         )
         .bind(entry.id)
         .bind(entry.asset_id.0)
         .bind(entry.upstream_asset_id.0)
         .bind(&entry.upstream_version)
+        .bind(&entry.upstream_old_version)
+        .bind(&entry.impact_level)
+        .bind(entry.since)
         .bind(entry.id.to_string()) // Use UUID as idempotency key
         .bind(entry.created_at)
         .execute(&self.pool)
@@ -322,11 +452,11 @@ impl adam_domain::DirtyQueueRepository for PostgresDirtyQueueRepository {
             r#"
             SELECT
                 id, asset_id, upstream_asset_id, upstream_version,
-                upstream_old_version, created_at, resolved_at
+                upstream_old_version, impact_level, since, created_at, resolved_at
             FROM dirty_queue
             WHERE asset_id = $1 AND resolved = false
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .bind(asset_id.0)
         .fetch_all(&self.pool)
@@ -340,6 +470,9 @@ impl adam_domain::DirtyQueueRepository for PostgresDirtyQueueRepository {
                 asset_id: AssetId::from_uuid(row.get("asset_id")),
                 upstream_asset_id: AssetId::from_uuid(row.get("upstream_asset_id")),
                 upstream_version: row.get("upstream_version"),
+                upstream_old_version: row.get("upstream_old_version"),
+                impact_level: row.get("impact_level"),
+                since: row.get("since"),
                 created_at: row.get("created_at"),
                 resolved_at: row.get("resolved_at"),
             })
@@ -352,7 +485,7 @@ impl adam_domain::DirtyQueueRepository for PostgresDirtyQueueRepository {
             UPDATE dirty_queue
             SET resolved = true, resolved_at = NOW()
             WHERE id = $1
-            "#
+            "#,
         )
         .bind(entry_id)
         .execute(&self.pool)
@@ -366,16 +499,18 @@ impl adam_domain::DirtyQueueRepository for PostgresDirtyQueueRepository {
         Ok(())
     }
 
-    async fn find_all_unresolved(&self) -> Result<Vec<adam_domain::repository::DirtyQueueEntry>, RepositoryError> {
+    async fn find_all_unresolved(
+        &self,
+    ) -> Result<Vec<adam_domain::repository::DirtyQueueEntry>, RepositoryError> {
         let rows = sqlx::query(
             r#"
             SELECT
                 id, asset_id, upstream_asset_id, upstream_version,
-                upstream_old_version, created_at, resolved_at
+                upstream_old_version, impact_level, since, created_at, resolved_at
             FROM dirty_queue
             WHERE resolved = false
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .fetch_all(&self.pool)
         .await
@@ -388,6 +523,9 @@ impl adam_domain::DirtyQueueRepository for PostgresDirtyQueueRepository {
                 asset_id: AssetId::from_uuid(row.get("asset_id")),
                 upstream_asset_id: AssetId::from_uuid(row.get("upstream_asset_id")),
                 upstream_version: row.get("upstream_version"),
+                upstream_old_version: row.get("upstream_old_version"),
+                impact_level: row.get("impact_level"),
+                since: row.get("since"),
                 created_at: row.get("created_at"),
                 resolved_at: row.get("resolved_at"),
             })
@@ -415,7 +553,7 @@ impl adam_domain::DependencyRepository for PostgresDependencyRepository {
             SELECT source_id
             FROM asset_dependencies
             WHERE target_id = $1
-            "#
+            "#,
         )
         .bind(asset_id.0)
         .fetch_all(&self.pool)
@@ -434,7 +572,7 @@ impl adam_domain::DependencyRepository for PostgresDependencyRepository {
             SELECT target_id
             FROM asset_dependencies
             WHERE source_id = $1
-            "#
+            "#,
         )
         .bind(asset_id.0)
         .fetch_all(&self.pool)
@@ -462,7 +600,7 @@ impl adam_domain::DependencyRepository for PostgresDependencyRepository {
                 gen_random_uuid(), $1, $2, '0.0.0', '0.0.0',
                 'system', NOW(), 'publish', NOW()
             )
-            "#
+            "#,
         )
         .bind(source_id.0)
         .bind(target_id.0)
@@ -470,7 +608,9 @@ impl adam_domain::DependencyRepository for PostgresDependencyRepository {
         .await
         .map_err(|e| {
             if e.to_string().contains("Cross-organization") {
-                RepositoryError::InvalidStateTransition("Cross-organization dependency not allowed".to_string())
+                RepositoryError::InvalidStateTransition(
+                    "Cross-organization dependency not allowed".to_string(),
+                )
             } else if e.to_string().contains("Cycle detected") {
                 RepositoryError::InvalidStateTransition("Dependency cycle detected".to_string())
             } else {
@@ -482,6 +622,149 @@ impl adam_domain::DependencyRepository for PostgresDependencyRepository {
     }
 }
 
+/// PostgreSQL implementation of AssetVersionRepository
+pub struct PostgresAssetVersionRepository {
+    pool: PgPool,
+}
+
+impl PostgresAssetVersionRepository {
+    /// Create a new PostgresAssetVersionRepository
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl adam_domain::AssetVersionRepository for PostgresAssetVersionRepository {
+    async fn create(&self, version: &adam_domain::AssetVersion) -> Result<(), RepositoryError> {
+        sqlx::query(
+            r#"
+            INSERT INTO asset_versions (
+                id, asset_id, version_number, metadata, dependencies,
+                release_notes, suggested_type, released_by, released_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "#,
+        )
+        .bind(version.id.0)
+        .bind(version.asset_id.0)
+        .bind(&version.version_number)
+        .bind(&version.metadata)
+        .bind(serde_json::to_value(&version.dependencies).unwrap_or_default())
+        .bind(&version.release_notes)
+        .bind(&version.suggested_type)
+        .bind(&version.released_by)
+        .bind(version.released_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn find_by_asset(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Vec<adam_domain::AssetVersion>, RepositoryError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id, asset_id, version_number, metadata, dependencies,
+                release_notes, suggested_type, released_by, released_at
+            FROM asset_versions
+            WHERE asset_id = $1
+            ORDER BY released_at DESC
+            "#,
+        )
+        .bind(asset_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|row| adam_domain::AssetVersion {
+                id: adam_domain::asset::version::AssetVersionId(row.get("id")),
+                asset_id: AssetId::from_uuid(row.get("asset_id")),
+                version_number: row.get("version_number"),
+                metadata: row.get("metadata"),
+                dependencies: serde_json::from_value(row.get("dependencies")).unwrap_or_default(),
+                release_notes: row.get("release_notes"),
+                suggested_type: row.get("suggested_type"),
+                released_by: row.get("released_by"),
+                released_at: row.get("released_at"),
+            })
+            .collect())
+    }
+
+    async fn find_by_version(
+        &self,
+        asset_id: &AssetId,
+        version: &str,
+    ) -> Result<Option<adam_domain::AssetVersion>, RepositoryError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id, asset_id, version_number, metadata, dependencies,
+                release_notes, suggested_type, released_by, released_at
+            FROM asset_versions
+            WHERE asset_id = $1 AND version_number = $2
+            "#,
+        )
+        .bind(asset_id.0)
+        .bind(version)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        Ok(row.map(|row| adam_domain::AssetVersion {
+            id: adam_domain::asset::version::AssetVersionId(row.get("id")),
+            asset_id: AssetId::from_uuid(row.get("asset_id")),
+            version_number: row.get("version_number"),
+            metadata: row.get("metadata"),
+            dependencies: serde_json::from_value(row.get("dependencies")).unwrap_or_default(),
+            release_notes: row.get("release_notes"),
+            suggested_type: row.get("suggested_type"),
+            released_by: row.get("released_by"),
+            released_at: row.get("released_at"),
+        }))
+    }
+
+    async fn find_latest(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Option<adam_domain::AssetVersion>, RepositoryError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id, asset_id, version_number, metadata, dependencies,
+                release_notes, suggested_type, released_by, released_at
+            FROM asset_versions
+            WHERE asset_id = $1
+            ORDER BY released_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(asset_id.0)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        Ok(row.map(|row| adam_domain::AssetVersion {
+            id: adam_domain::asset::version::AssetVersionId(row.get("id")),
+            asset_id: AssetId::from_uuid(row.get("asset_id")),
+            version_number: row.get("version_number"),
+            metadata: row.get("metadata"),
+            dependencies: serde_json::from_value(row.get("dependencies")).unwrap_or_default(),
+            release_notes: row.get("release_notes"),
+            suggested_type: row.get("suggested_type"),
+            released_by: row.get("released_by"),
+            released_at: row.get("released_at"),
+        }))
+    }
+}
+
+#[cfg(test)]
 #[cfg(test)]
 mod tests {
     // Note: These tests require a running PostgreSQL instance

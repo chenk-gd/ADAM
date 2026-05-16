@@ -1,6 +1,6 @@
 //! Asset instance domain model
 
-use crate::asset::state::AssetState;
+use crate::asset::state::{AssetState, StateError};
 use crate::dependency::boundary::AssetLevel;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -100,19 +100,19 @@ pub struct AssetInstance {
     pub project_id: Option<ProjectId>,
     pub organization_id: OrganizationId,
     pub level: AssetLevel,
-    pub current_state: AssetState,
+    pub(crate) current_state: AssetState,
 
     // 新增字段 (根据 spec 5.2.3)
-    pub external_ref: String,           // 外部系统引用地址
-    pub source: String,                 // 来源：git/wiki/jira/manual
-    pub metadata: serde_json::Value,    // 按类型 schema 的元数据
-    pub assignees: Vec<String>,         // 责任人列表
-    pub publisher: Option<String>,      // 最新版本发布人
-    pub current_version: Option<String>, // 当前发布的版本号
+    pub external_ref: String,                   // 外部系统引用地址
+    pub source: String,                         // 来源：git/wiki/jira/manual
+    pub metadata: serde_json::Value,            // 按类型 schema 的元数据
+    pub assignees: Vec<String>,                 // 责任人列表
+    pub(crate) publisher: Option<String>,       // 最新版本发布人
+    pub(crate) current_version: Option<String>, // 当前发布的版本号
 
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub idempotency_key: Option<String>,
+    pub(crate) updated_at: DateTime<Utc>,
+    pub(crate) idempotency_key: Option<String>,
 }
 
 impl AssetInstance {
@@ -181,6 +181,140 @@ impl AssetInstance {
     pub fn is_archived(&self) -> bool {
         self.current_state.is_archived()
     }
+
+    /// Get the current state
+    pub fn state(&self) -> AssetState {
+        self.current_state
+    }
+
+    /// Get the publisher
+    pub fn publisher(&self) -> Option<&String> {
+        self.publisher.as_ref()
+    }
+
+    /// Get the current version
+    pub fn current_version(&self) -> Option<&String> {
+        self.current_version.as_ref()
+    }
+
+    /// Get the updated_at timestamp
+    pub fn updated_at(&self) -> DateTime<Utc> {
+        self.updated_at
+    }
+
+    /// Get the idempotency key
+    pub fn idempotency_key(&self) -> Option<&String> {
+        self.idempotency_key.as_ref()
+    }
+
+    /// Mark the asset as dirty (transition from Clean to Dirty)
+    pub fn mark_dirty(&mut self) -> Result<(), StateError> {
+        self.current_state.validate_transition(AssetState::Dirty)?;
+        self.current_state = AssetState::Dirty;
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    /// Mark the asset as clean (transition from Dirty to Clean)
+    pub fn mark_clean(&mut self) -> Result<(), StateError> {
+        self.current_state.validate_transition(AssetState::Clean)?;
+        self.current_state = AssetState::Clean;
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    /// Archive the asset (transition to Archived)
+    pub fn archive(&mut self) -> Result<(), StateError> {
+        self.current_state
+            .validate_transition(AssetState::Archived)?;
+        self.current_state = AssetState::Archived;
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    /// Set the publisher
+    pub fn set_publisher(&mut self, publisher: impl Into<String>) {
+        self.publisher = Some(publisher.into());
+        self.updated_at = Utc::now();
+    }
+
+    /// Set the current version
+    pub fn set_current_version(&mut self, version: impl Into<String>) {
+        self.current_version = Some(version.into());
+        self.updated_at = Utc::now();
+    }
+
+    /// Set the idempotency key
+    pub fn set_idempotency_key(&mut self, key: impl Into<String>) {
+        self.idempotency_key = Some(key.into());
+    }
+
+    /// Create a new AssetInstance with all fields (for repository use)
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_fields(
+        id: AssetId,
+        name: String,
+        asset_type_id: AssetTypeId,
+        project_id: Option<ProjectId>,
+        organization_id: OrganizationId,
+        level: AssetLevel,
+        current_state: AssetState,
+        external_ref: String,
+        source: String,
+        metadata: serde_json::Value,
+        assignees: Vec<String>,
+        publisher: Option<String>,
+        current_version: Option<String>,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+        idempotency_key: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            asset_type_id,
+            project_id,
+            organization_id,
+            level,
+            current_state,
+            external_ref,
+            source,
+            metadata,
+            assignees,
+            publisher,
+            current_version,
+            created_at,
+            updated_at,
+            idempotency_key,
+        }
+    }
+
+    /// Update state (for repository use - only accessible within domain crate)
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub(crate) fn update_state_internal(&mut self, state: AssetState) {
+        self.current_state = state;
+        self.updated_at = Utc::now();
+    }
+
+    /// Update the name
+    pub fn update_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+        self.updated_at = Utc::now();
+    }
+
+    /// Update the assignees
+    pub fn update_assignees(&mut self, assignees: Vec<String>) {
+        self.assignees = assignees;
+        self.updated_at = Utc::now();
+    }
+
+    /// Update the metadata
+    pub fn update_metadata(&mut self, metadata: serde_json::Value) {
+        self.metadata = metadata;
+        self.updated_at = Utc::now();
+    }
 }
 
 #[cfg(test)]
@@ -214,7 +348,7 @@ mod tests {
         assert_eq!(asset.level, AssetLevel::Project);
         assert_eq!(asset.project_id, Some(project_id));
         assert_eq!(asset.organization_id, org_id);
-        assert_eq!(asset.current_state, AssetState::Clean);
+        assert_eq!(asset.state(), AssetState::Clean);
         assert_eq!(asset.external_ref, "https://example.com/asset/1");
         assert_eq!(asset.source, "manual");
         assert!(asset.assignees.is_empty());
@@ -237,7 +371,7 @@ mod tests {
         assert_eq!(asset.name, "Org Standard");
         assert_eq!(asset.level, AssetLevel::Organization);
         assert_eq!(asset.project_id, None);
-        assert_eq!(asset.current_state, AssetState::Clean);
+        assert_eq!(asset.state(), AssetState::Clean);
         assert_eq!(asset.source, "wiki");
     }
 
@@ -255,7 +389,7 @@ mod tests {
         );
 
         assert!(!asset.is_archived());
-        asset.current_state = AssetState::Archived;
+        asset.archive().unwrap();
         assert!(asset.is_archived());
     }
 }

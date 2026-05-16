@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS asset_instances (
     source VARCHAR(50) NOT NULL,
     level VARCHAR(20) NOT NULL CHECK (level IN ('project', 'organization')),
     project_id UUID REFERENCES projects(id),
-    current_version VARCHAR(200) NOT NULL,
+    current_version VARCHAR(200), -- NULL until first publish
     current_state VARCHAR(20) NOT NULL CHECK (current_state IN ('clean', 'dirty', 'archived')),
     archived_at TIMESTAMPTZ,
     archived_reason TEXT,

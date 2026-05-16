@@ -79,6 +79,12 @@ impl StatePropagator {
                 asset_id: downstream_id,
                 upstream_asset_id: *asset_id,
                 upstream_version: new_version.to_string(),
+                upstream_old_version: downstream_asset
+                    .current_version()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "0.0.0".to_string()),
+                impact_level: "medium".to_string(),
+                since: chrono::Utc::now(),
                 created_at: chrono::Utc::now(),
                 resolved_at: None,
             };
@@ -152,9 +158,30 @@ mod tests {
         let org_id = OrganizationId::new();
         let type_id = AssetTypeId::new();
 
-        let asset_a = AssetInstance::new_organization_level("Asset A", type_id, org_id);
-        let asset_b = AssetInstance::new_organization_level("Asset B", type_id, org_id);
-        let asset_c = AssetInstance::new_organization_level("Asset C", type_id, org_id);
+        let asset_a = AssetInstance::new_organization_level(
+            "Asset A",
+            type_id,
+            org_id,
+            "https://example.com/a",
+            "manual",
+            serde_json::json!({}),
+        );
+        let asset_b = AssetInstance::new_organization_level(
+            "Asset B",
+            type_id,
+            org_id,
+            "https://example.com/b",
+            "manual",
+            serde_json::json!({}),
+        );
+        let asset_c = AssetInstance::new_organization_level(
+            "Asset C",
+            type_id,
+            org_id,
+            "https://example.com/c",
+            "manual",
+            serde_json::json!({}),
+        );
 
         let asset_repo = InMemoryAssetRepository::with_data(vec![
             asset_a.clone(),
@@ -191,8 +218,8 @@ mod tests {
         // Assert: B and C are now in Dirty state
         let b = asset_repo.find_by_id(&asset_b.id).await.unwrap().unwrap();
         let c = asset_repo.find_by_id(&asset_c.id).await.unwrap().unwrap();
-        assert_eq!(b.current_state, AssetState::Dirty);
-        assert_eq!(c.current_state, AssetState::Dirty);
+        assert_eq!(b.state(), AssetState::Dirty);
+        assert_eq!(c.state(), AssetState::Dirty);
     }
 
     #[tokio::test]
@@ -200,20 +227,35 @@ mod tests {
         let org_id = OrganizationId::new();
         let type_id = AssetTypeId::new();
 
-        let asset_a = AssetInstance::new_organization_level("Asset A", type_id, org_id);
-        let asset_b = AssetInstance::new_organization_level("Asset B", type_id, org_id);
+        let asset_a = AssetInstance::new_organization_level(
+            "Asset A",
+            type_id,
+            org_id,
+            "https://example.com/a",
+            "manual",
+            serde_json::json!({}),
+        );
+        let asset_b = AssetInstance::new_organization_level(
+            "Asset B",
+            type_id,
+            org_id,
+            "https://example.com/b",
+            "manual",
+            serde_json::json!({}),
+        );
 
         // Create initial dirty entry (from v1.0.0)
-        let dirty_repo = InMemoryDirtyQueueRepository {
-            data: Mutex::new(vec![DirtyQueueEntry {
-                id: uuid::Uuid::new_v4(),
-                asset_id: asset_b.id,
-                upstream_asset_id: asset_a.id,
-                upstream_version: "v1.0.0".to_string(),
-                created_at: chrono::Utc::now(),
-                resolved_at: None,
-            }]),
-        };
+        let dirty_repo = InMemoryDirtyQueueRepository::with_data(vec![DirtyQueueEntry {
+            id: uuid::Uuid::new_v4(),
+            asset_id: asset_b.id,
+            upstream_asset_id: asset_a.id,
+            upstream_version: "v1.0.0".to_string(),
+            upstream_old_version: "0.0.0".to_string(),
+            impact_level: "medium".to_string(),
+            since: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
+        }]);
 
         let asset_repo = InMemoryAssetRepository::with_data(vec![asset_a.clone(), asset_b.clone()]);
         let dependency_repo = InMemoryDependencyRepo::with_dependency(asset_b.id, asset_a.id);
@@ -235,7 +277,7 @@ mod tests {
         assert_eq!(affected[0], asset_b.id);
 
         // Verify version was updated
-        let entries = dirty_repo.data.lock().unwrap();
+        let entries = dirty_repo.find_all_unresolved().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].upstream_version, "v2.0.0");
     }
@@ -245,12 +287,35 @@ mod tests {
         let org_id = OrganizationId::new();
         let type_id = AssetTypeId::new();
 
-        let asset_a = AssetInstance::new_organization_level("Asset A", type_id, org_id);
+        let asset_a = AssetInstance::new_organization_level(
+            "Asset A",
+            type_id,
+            org_id,
+            "https://example.com/a",
+            "manual",
+            serde_json::json!({}),
+        );
         // Create B as archived
-        let mut asset_b = AssetInstance::new_organization_level("Asset B", type_id, org_id);
-        asset_b.current_state = AssetState::Archived;
+        let mut asset_b = AssetInstance::new_organization_level(
+            "Asset B",
+            type_id,
+            org_id,
+            "https://example.com/b",
+            "manual",
+            serde_json::json!({}),
+        );
 
-        let asset_c = AssetInstance::new_organization_level("Asset C", type_id, org_id);
+        let asset_c = AssetInstance::new_organization_level(
+            "Asset C",
+            type_id,
+            org_id,
+            "https://example.com/c",
+            "manual",
+            serde_json::json!({}),
+        );
+
+        // Archive B before putting in repository
+        asset_b.archive().unwrap();
 
         let asset_repo = InMemoryAssetRepository::with_data(vec![
             asset_a.clone(),
@@ -286,8 +351,8 @@ mod tests {
         // B should remain Archived, C should be Dirty
         let b = asset_repo.find_by_id(&asset_b.id).await.unwrap().unwrap();
         let c = asset_repo.find_by_id(&asset_c.id).await.unwrap().unwrap();
-        assert_eq!(b.current_state, AssetState::Archived);
-        assert_eq!(c.current_state, AssetState::Dirty);
+        assert_eq!(b.state(), AssetState::Archived);
+        assert_eq!(c.state(), AssetState::Dirty);
     }
 
     #[tokio::test]
@@ -296,10 +361,24 @@ mod tests {
         let type_id = AssetTypeId::new();
 
         // Create archived A
-        let mut asset_a = AssetInstance::new_organization_level("Asset A", type_id, org_id);
-        asset_a.current_state = AssetState::Archived;
+        let mut asset_a = AssetInstance::new_organization_level(
+            "Asset A",
+            type_id,
+            org_id,
+            "https://example.com/a",
+            "manual",
+            serde_json::json!({}),
+        );
+        asset_a.archive().unwrap();
 
-        let asset_b = AssetInstance::new_organization_level("Asset B", type_id, org_id);
+        let asset_b = AssetInstance::new_organization_level(
+            "Asset B",
+            type_id,
+            org_id,
+            "https://example.com/b",
+            "manual",
+            serde_json::json!({}),
+        );
 
         let asset_repo = InMemoryAssetRepository::with_data(vec![asset_a.clone(), asset_b.clone()]);
         let dependency_repo = InMemoryDependencyRepo::with_dependency(asset_b.id, asset_a.id);
@@ -324,7 +403,7 @@ mod tests {
         ));
 
         // Verify dirty queue is empty
-        let entries = dirty_repo.data.lock().unwrap();
+        let entries = dirty_repo.find_all_unresolved().await.unwrap();
         assert!(entries.is_empty());
     }
 
@@ -333,9 +412,23 @@ mod tests {
         let org_id = OrganizationId::new();
         let type_id = AssetTypeId::new();
 
-        let asset_a = AssetInstance::new_organization_level("Asset A", type_id, org_id);
+        let asset_a = AssetInstance::new_organization_level(
+            "Asset A",
+            type_id,
+            org_id,
+            "https://example.com/a",
+            "manual",
+            serde_json::json!({}),
+        );
         // Don't create asset_b - it will be missing
-        let asset_b = AssetInstance::new_organization_level("Asset B", type_id, org_id);
+        let asset_b = AssetInstance::new_organization_level(
+            "Asset B",
+            type_id,
+            org_id,
+            "https://example.com/b",
+            "manual",
+            serde_json::json!({}),
+        );
 
         let asset_repo = InMemoryAssetRepository::with_data(vec![asset_a.clone()]); // B is missing
         let dependency_repo = InMemoryDependencyRepo::with_dependency(asset_b.id, asset_a.id);

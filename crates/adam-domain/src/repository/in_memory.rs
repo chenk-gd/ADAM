@@ -3,7 +3,11 @@
 use crate::asset::asset_type::AssetType;
 use crate::asset::instance::{AssetId, AssetInstance, AssetTypeId};
 use crate::asset::state::AssetState;
-use crate::repository::{AssetRepository, AssetTypeRepository, CreateAssetCommand, RepositoryError};
+use crate::asset::version::{AssetVersion, AssetVersionId, AssetVersionRepository};
+use crate::repository::{
+    AssetRepository, AssetTypeRepository, CreateAssetCommand, DependencyRepository,
+    RepositoryError, UpdateAssetCommand,
+};
 use crate::{
     DirtyQueueEntry, DirtyQueueRepository, OrganizationId, ProjectId, VirtualInstance,
     VirtualInstanceId, VirtualInstanceRepository,
@@ -15,7 +19,7 @@ use std::sync::Mutex;
 
 /// In-memory asset repository for testing
 pub struct InMemoryAssetRepository {
-    pub data: Mutex<HashMap<AssetId, AssetInstance>>,
+    data: Mutex<HashMap<AssetId, AssetInstance>>,
 }
 
 impl InMemoryAssetRepository {
@@ -26,7 +30,7 @@ impl InMemoryAssetRepository {
         }
     }
 
-    /// Create a repository with pre-populated data
+    /// Create a repository with pre-populated data (for testing)
     pub fn with_data(assets: Vec<AssetInstance>) -> Self {
         let map: HashMap<AssetId, AssetInstance> = assets.into_iter().map(|a| (a.id, a)).collect();
         Self {
@@ -97,6 +101,13 @@ impl AssetRepository for InMemoryAssetRepository {
             .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
 
         if let Some(asset) = data.get_mut(id) {
+            // Validate state transition
+            if !asset.current_state.can_transition_to(state) {
+                return Err(RepositoryError::InvalidStateTransition(format!(
+                    "Cannot transition from {:?} to {:?}",
+                    asset.current_state, state
+                )));
+            }
             asset.current_state = state;
             asset.updated_at = Utc::now();
             Ok(())
@@ -136,11 +147,50 @@ impl AssetRepository for InMemoryAssetRepository {
             .cloned()
             .collect())
     }
+
+    async fn update(
+        &self,
+        id: &AssetId,
+        cmd: &UpdateAssetCommand,
+    ) -> Result<AssetInstance, RepositoryError> {
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+
+        if let Some(asset) = data.get_mut(id) {
+            if let Some(name) = &cmd.name {
+                asset.update_name(name.clone());
+            }
+            if let Some(assignees) = &cmd.assignees {
+                asset.update_assignees(assignees.clone());
+            }
+            if let Some(metadata) = &cmd.metadata {
+                asset.update_metadata(metadata.clone());
+            }
+            Ok(asset.clone())
+        } else {
+            Err(RepositoryError::NotFound(format!("{id:?}")))
+        }
+    }
+
+    async fn delete(&self, id: &AssetId) -> Result<(), RepositoryError> {
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+
+        if data.remove(id).is_some() {
+            Ok(())
+        } else {
+            Err(RepositoryError::NotFound(format!("{id:?}")))
+        }
+    }
 }
 
 /// In-memory dirty queue repository for testing
 pub struct InMemoryDirtyQueueRepository {
-    pub data: Mutex<Vec<DirtyQueueEntry>>,
+    data: Mutex<Vec<DirtyQueueEntry>>,
 }
 
 impl InMemoryDirtyQueueRepository {
@@ -148,6 +198,13 @@ impl InMemoryDirtyQueueRepository {
     pub fn new() -> Self {
         Self {
             data: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Create a repository with pre-populated data (for testing)
+    pub fn with_data(entries: Vec<DirtyQueueEntry>) -> Self {
+        Self {
+            data: Mutex::new(entries),
         }
     }
 }
@@ -172,10 +229,14 @@ impl DirtyQueueRepository for InMemoryDirtyQueueRepository {
                 && e.upstream_asset_id == entry.upstream_asset_id
                 && e.resolved_at.is_none()
         }) {
-            // Update existing entry
+            // Update existing entry with new fields
             existing
                 .upstream_version
                 .clone_from(&entry.upstream_version);
+            existing
+                .upstream_old_version
+                .clone_from(&entry.upstream_old_version);
+            existing.impact_level.clone_from(&entry.impact_level);
         } else {
             // Insert new entry
             data.push(entry.clone());
@@ -306,7 +367,7 @@ impl VirtualInstanceRepository for InMemoryVirtualInstanceRepository {
 
 /// In-memory asset type repository for testing
 pub struct InMemoryAssetTypeRepository {
-    pub data: Mutex<HashMap<AssetTypeId, AssetType>>,
+    data: Mutex<HashMap<AssetTypeId, AssetType>>,
 }
 
 impl InMemoryAssetTypeRepository {
@@ -314,6 +375,14 @@ impl InMemoryAssetTypeRepository {
     pub fn new() -> Self {
         Self {
             data: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Create a repository with pre-populated data (for testing)
+    pub fn with_data(types: Vec<AssetType>) -> Self {
+        let map: HashMap<AssetTypeId, AssetType> = types.into_iter().map(|t| (t.id, t)).collect();
+        Self {
+            data: Mutex::new(map),
         }
     }
 }
@@ -327,27 +396,172 @@ impl Default for InMemoryAssetTypeRepository {
 #[async_trait]
 impl AssetTypeRepository for InMemoryAssetTypeRepository {
     async fn create(&self, asset_type: &AssetType) -> Result<AssetType, RepositoryError> {
-        let mut data = self.data.lock()
+        let mut data = self
+            .data
+            .lock()
             .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
         data.insert(asset_type.id, asset_type.clone());
         Ok(asset_type.clone())
     }
 
     async fn find_by_id(&self, id: &AssetTypeId) -> Result<Option<AssetType>, RepositoryError> {
-        let data = self.data.lock()
+        let data = self
+            .data
+            .lock()
             .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
         Ok(data.get(id).cloned())
     }
 
     async fn find_by_name(&self, name: &str) -> Result<Option<AssetType>, RepositoryError> {
-        let data = self.data.lock()
+        let data = self
+            .data
+            .lock()
             .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
         Ok(data.values().find(|at| at.name == name).cloned())
     }
 
     async fn list_all(&self) -> Result<Vec<AssetType>, RepositoryError> {
-        let data = self.data.lock()
+        let data = self
+            .data
+            .lock()
             .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
         Ok(data.values().cloned().collect())
+    }
+}
+
+/// In-memory dependency repository for testing
+pub struct InMemoryDependencyRepository {
+    /// Stores upstream dependencies: asset_id -> list of assets it depends on
+    upstream: Mutex<HashMap<AssetId, Vec<AssetId>>>,
+    /// Stores downstream dependencies: asset_id -> list of assets that depend on it
+    downstream: Mutex<HashMap<AssetId, Vec<AssetId>>>,
+}
+
+impl InMemoryDependencyRepository {
+    /// Create a new empty repository
+    pub fn new() -> Self {
+        Self {
+            upstream: Mutex::new(HashMap::new()),
+            downstream: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for InMemoryDependencyRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl DependencyRepository for InMemoryDependencyRepository {
+    async fn find_downstream(&self, asset_id: &AssetId) -> Result<Vec<AssetId>, RepositoryError> {
+        let downstream = self.downstream.lock().map_err(|_| {
+            RepositoryError::DatabaseError("Failed to lock downstream map".to_string())
+        })?;
+        Ok(downstream.get(asset_id).cloned().unwrap_or_default())
+    }
+
+    async fn find_upstream(&self, asset_id: &AssetId) -> Result<Vec<AssetId>, RepositoryError> {
+        let upstream = self.upstream.lock().map_err(|_| {
+            RepositoryError::DatabaseError("Failed to lock upstream map".to_string())
+        })?;
+        Ok(upstream.get(asset_id).cloned().unwrap_or_default())
+    }
+
+    async fn create_dependency(
+        &self,
+        source_id: &AssetId,
+        target_id: &AssetId,
+    ) -> Result<(), RepositoryError> {
+        // source depends on target (source -> target)
+        let mut upstream = self.upstream.lock().map_err(|_| {
+            RepositoryError::DatabaseError("Failed to lock upstream map".to_string())
+        })?;
+        upstream.entry(*source_id).or_default().push(*target_id);
+
+        let mut downstream = self.downstream.lock().map_err(|_| {
+            RepositoryError::DatabaseError("Failed to lock downstream map".to_string())
+        })?;
+        downstream.entry(*target_id).or_default().push(*source_id);
+
+        Ok(())
+    }
+}
+
+/// In-memory asset version repository for testing
+pub struct InMemoryAssetVersionRepository {
+    data: Mutex<HashMap<AssetVersionId, AssetVersion>>,
+}
+
+impl InMemoryAssetVersionRepository {
+    /// Create a new empty repository
+    pub fn new() -> Self {
+        Self {
+            data: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for InMemoryAssetVersionRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl AssetVersionRepository for InMemoryAssetVersionRepository {
+    async fn create(&self, version: &AssetVersion) -> Result<(), RepositoryError> {
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        data.insert(version.id, version.clone());
+        Ok(())
+    }
+
+    async fn find_by_asset(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Vec<AssetVersion>, RepositoryError> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        Ok(data
+            .values()
+            .filter(|v| v.asset_id == *asset_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_version(
+        &self,
+        asset_id: &AssetId,
+        version: &str,
+    ) -> Result<Option<AssetVersion>, RepositoryError> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        Ok(data
+            .values()
+            .find(|v| v.asset_id == *asset_id && v.version_number == version)
+            .cloned())
+    }
+
+    async fn find_latest(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Option<AssetVersion>, RepositoryError> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        Ok(data
+            .values()
+            .filter(|v| v.asset_id == *asset_id)
+            .max_by_key(|v| &v.released_at)
+            .cloned())
     }
 }

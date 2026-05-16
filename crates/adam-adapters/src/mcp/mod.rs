@@ -3,6 +3,8 @@
 // Allow deprecated rmcp::Error - the library will update to rmcp::ErrorData/RmcpError
 #![allow(deprecated)]
 
+use adam_application::VersionService;
+use adam_application::services::version_service::ChangeType;
 use rmcp::{
     ServerHandler,
     model::{CallToolRequestParam, CallToolResult, Content, Implementation, ServerInfo, Tool},
@@ -308,11 +310,11 @@ pub struct ManualCleanAssetResponse {
 // ============================================================================
 
 /// ADAM MCP Server handler
-pub struct AdanMcpServer {
+pub struct AdamMcpServer {
     state: McpServerState,
 }
 
-impl AdanMcpServer {
+impl AdamMcpServer {
     /// Create a new MCP server with authentication
     pub fn new(state: McpServerState) -> Self {
         Self { state }
@@ -563,10 +565,10 @@ impl AdanMcpServer {
             id: asset.id.0.to_string(),
             name: asset.name.clone(),
             asset_type: asset.asset_type_id.0.to_string(),
-            state: format!("{:?}", asset.current_state),
+            state: format!("{:?}", asset.state()),
             level: format!("{:?}", asset.level),
             created_at: asset.created_at.to_rfc3339(),
-            updated_at: asset.updated_at.to_rfc3339(),
+            updated_at: asset.updated_at().to_rfc3339(),
         };
 
         match serde_json::to_string(&response) {
@@ -701,7 +703,7 @@ impl AdanMcpServer {
                     id: dep_asset.id.0.to_string(),
                     name: dep_asset.name.clone(),
                     asset_type: dep_asset.asset_type_id.0.to_string(),
-                    state: format!("{:?}", dep_asset.current_state),
+                    state: format!("{:?}", dep_asset.state()),
                 });
             }
         }
@@ -859,13 +861,16 @@ impl AdanMcpServer {
 
         // Create and execute state propagator for dirty propagation
         let propagator = StatePropagator::new();
-        let affected = match propagator.on_asset_published(
-            &asset_id,
-            &version,
-            self.state.asset_repo.as_ref(),
-            self.state.dependency_repo.as_ref(),
-            self.state.dirty_repo.as_ref(),
-        ).await {
+        let affected = match propagator
+            .on_asset_published(
+                &asset_id,
+                &version,
+                self.state.asset_repo.as_ref(),
+                self.state.dependency_repo.as_ref(),
+                self.state.dirty_repo.as_ref(),
+            )
+            .await
+        {
             Ok(affected) => affected,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -934,19 +939,46 @@ impl AdanMcpServer {
             return Ok(CallToolResult::error(vec![Content::text(e.to_string())]));
         }
 
-        // Suggest version based on change type
-        let suggested_version = match request.change_type.as_deref() {
-            Some("major") => "2.0.0".to_string(),
-            Some("minor") => "1.1.0".to_string(),
-            Some("patch") => "1.0.1".to_string(),
-            _ => "1.0.0".to_string(),
+        // Get current version from asset
+        let current_version = asset
+            .current_version()
+            .map(|v| v.as_str())
+            .unwrap_or("0.0.0");
+
+        // Map change_type string to ChangeType enum
+        let change_type = match request.change_type.as_deref() {
+            Some("major") => ChangeType::Breaking,
+            Some("minor") => ChangeType::Feature,
+            Some("patch") => ChangeType::Bugfix,
+            _ => ChangeType::Feature, // default to minor bump
+        };
+
+        // Use VersionService to suggest version - import concrete types for turbofish
+        use adam_domain::{
+            InMemoryAssetRepository, InMemoryAssetVersionRepository, InMemoryDirtyQueueRepository,
+        };
+        let suggested_version = match VersionService::<
+            InMemoryAssetRepository,
+            InMemoryDirtyQueueRepository,
+            InMemoryAssetVersionRepository,
+        >::suggest_version(current_version, change_type)
+        {
+            Ok(version) => version,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Version suggestion error: {e}"
+                ))]));
+            }
         };
 
         let response = SuggestVersionResponse {
             asset_id: asset.id.0.to_string(),
             suggested_version,
-            current_version: None, // Would come from latest AssetVersion
-            reason: format!("Suggested based on {:?} change type", request.change_type),
+            current_version: asset.current_version().map(|v| v.to_string()),
+            reason: format!(
+                "Suggested {:?} version bump from {}",
+                request.change_type, current_version
+            ),
         };
 
         match serde_json::to_string(&response) {
@@ -994,11 +1026,32 @@ impl AdanMcpServer {
             return Ok(CallToolResult::error(vec![Content::text(e.to_string())]));
         }
 
-        let previous_state = format!("{:?}", asset.current_state);
+        let previous_state = format!("{:?}", asset.state());
 
-        // Check for upstream changes
-        // In full implementation, this would compare upstream versions
-        let upstream_changes = true;
+        // Check for upstream changes by comparing current upstream versions
+        // with the effective versions recorded in dependencies
+        let upstream_assets = self
+            .state
+            .dependency_repo
+            .find_upstream(&asset_id)
+            .await
+            .map_err(|e| {
+                rmcp::Error::internal_error(
+                    format!("Failed to find upstream assets: {e}"),
+                    None::<serde_json::Value>,
+                )
+            })?;
+
+        let mut upstream_changes = false;
+        for upstream_id in upstream_assets {
+            if let Ok(Some(upstream)) = self.state.asset_repo.find_by_id(&upstream_id).await {
+                // If upstream has a newer version than what we recorded, there's a change
+                if upstream.current_version() != asset.current_version() {
+                    upstream_changes = true;
+                    break;
+                }
+            }
+        }
 
         let response = RefreshAssetStateResponse {
             asset_id: asset.id.0.to_string(),
@@ -1054,18 +1107,54 @@ impl AdanMcpServer {
             return Ok(CallToolResult::error(vec![Content::text(e.to_string())]));
         }
 
-        let previous_state = format!("{:?}", asset.current_state);
+        let previous_state = format!("{:?}", asset.state());
 
-        // TODO: In full implementation, this would:
-        // 1. Update asset state to Clean
-        // 2. Update effective dependency versions
-        // 3. Create DirtyResolutionLog entry
+        // Check for unresolved dirty queue entries
+        let unresolved = self
+            .state
+            .dirty_repo
+            .find_unresolved_by_asset(&asset_id)
+            .await
+            .map_err(|e| {
+                rmcp::Error::internal_error(
+                    format!("Failed to find unresolved entries: {e}"),
+                    None::<serde_json::Value>,
+                )
+            })?;
+
+        // Mark all unresolved entries as resolved
+        for entry in &unresolved {
+            self.state
+                .dirty_repo
+                .resolve(&entry.id)
+                .await
+                .map_err(|e| {
+                    rmcp::Error::internal_error(
+                        format!("Failed to resolve dirty entry: {e}"),
+                        None::<serde_json::Value>,
+                    )
+                })?;
+        }
+
+        // Update asset state to Clean
+        self.state
+            .asset_repo
+            .update_state(&asset_id, adam_domain::asset::state::AssetState::Clean)
+            .await
+            .map_err(|e| {
+                rmcp::Error::internal_error(
+                    format!("Failed to update asset state: {e}"),
+                    None::<serde_json::Value>,
+                )
+            })?;
+
+        let review_id = uuid::Uuid::new_v4().to_string();
 
         let response = ManualCleanAssetResponse {
             asset_id: asset.id.0.to_string(),
             previous_state,
             current_state: "Clean".to_string(),
-            review_id: uuid::Uuid::new_v4().to_string(),
+            review_id,
         };
 
         match serde_json::to_string(&response) {
@@ -1077,7 +1166,7 @@ impl AdanMcpServer {
     }
 }
 
-impl ServerHandler for AdanMcpServer {
+impl ServerHandler for AdamMcpServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParam,
@@ -1085,202 +1174,72 @@ impl ServerHandler for AdanMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         match request.name.as_ref() {
             "query_assets" => {
-                let params: QueryAssetsRequest = match request
-                    .arguments
-                    .map(|v| serde_json::from_value(serde_json::Value::Object(v)))
-                    .transpose()
-                {
-                    Ok(Some(p)) => p,
-                    Ok(None) => {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "Missing arguments",
-                        )]));
-                    }
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Invalid parameters: {e}"
-                        ))]));
-                    }
+                let params: QueryAssetsRequest = match parse_args(request.arguments) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(e),
                 };
                 self.query_assets(params).await
             }
             "get_asset" => {
-                let params: GetAssetRequest = match request
-                    .arguments
-                    .map(|v| serde_json::from_value(serde_json::Value::Object(v)))
-                    .transpose()
-                {
-                    Ok(Some(p)) => p,
-                    Ok(None) => {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "Missing arguments",
-                        )]));
-                    }
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Invalid parameters: {e}"
-                        ))]));
-                    }
+                let params: GetAssetRequest = match parse_args(request.arguments) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(e),
                 };
                 self.get_asset(params).await
             }
             "get_asset_content" => {
-                let params: GetAssetContentRequest = match request
-                    .arguments
-                    .map(|v| serde_json::from_value(serde_json::Value::Object(v)))
-                    .transpose()
-                {
-                    Ok(Some(p)) => p,
-                    Ok(None) => {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "Missing arguments",
-                        )]));
-                    }
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Invalid parameters: {e}"
-                        ))]));
-                    }
+                let params: GetAssetContentRequest = match parse_args(request.arguments) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(e),
                 };
                 self.get_asset_content(params).await
             }
             "get_dependency_graph" => {
-                let params: GetDependencyGraphRequest = match request
-                    .arguments
-                    .map(|v| serde_json::from_value(serde_json::Value::Object(v)))
-                    .transpose()
-                {
-                    Ok(Some(p)) => p,
-                    Ok(None) => {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "Missing arguments",
-                        )]));
-                    }
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Invalid parameters: {e}"
-                        ))]));
-                    }
+                let params: GetDependencyGraphRequest = match parse_args(request.arguments) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(e),
                 };
                 self.get_dependency_graph(params).await
             }
             "create_virtual_asset" => {
-                let params: CreateVirtualAssetRequest = match request
-                    .arguments
-                    .map(|v| serde_json::from_value(serde_json::Value::Object(v)))
-                    .transpose()
-                {
-                    Ok(Some(p)) => p,
-                    Ok(None) => {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "Missing arguments",
-                        )]));
-                    }
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Invalid parameters: {e}"
-                        ))]));
-                    }
+                let params: CreateVirtualAssetRequest = match parse_args(request.arguments) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(e),
                 };
                 self.create_virtual_asset(params).await
             }
             "get_virtual_context" => {
-                let params: GetVirtualContextRequest = match request
-                    .arguments
-                    .map(|v| serde_json::from_value(serde_json::Value::Object(v)))
-                    .transpose()
-                {
-                    Ok(Some(p)) => p,
-                    Ok(None) => {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "Missing arguments",
-                        )]));
-                    }
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Invalid parameters: {e}"
-                        ))]));
-                    }
+                let params: GetVirtualContextRequest = match parse_args(request.arguments) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(e),
                 };
                 self.get_virtual_context(params).await
             }
             "publish_asset" => {
-                let params: PublishAssetRequest = match request
-                    .arguments
-                    .map(|v| serde_json::from_value(serde_json::Value::Object(v)))
-                    .transpose()
-                {
-                    Ok(Some(p)) => p,
-                    Ok(None) => {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "Missing arguments",
-                        )]));
-                    }
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Invalid parameters: {e}"
-                        ))]));
-                    }
+                let params: PublishAssetRequest = match parse_args(request.arguments) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(e),
                 };
                 self.publish_asset(params).await
             }
             "suggest_version" => {
-                let params: SuggestVersionRequest = match request
-                    .arguments
-                    .map(|v| serde_json::from_value(serde_json::Value::Object(v)))
-                    .transpose()
-                {
-                    Ok(Some(p)) => p,
-                    Ok(None) => {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "Missing arguments",
-                        )]));
-                    }
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Invalid parameters: {e}"
-                        ))]));
-                    }
+                let params: SuggestVersionRequest = match parse_args(request.arguments) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(e),
                 };
                 self.suggest_version(params).await
             }
             "refresh_asset_state" => {
-                let params: RefreshAssetStateRequest = match request
-                    .arguments
-                    .map(|v| serde_json::from_value(serde_json::Value::Object(v)))
-                    .transpose()
-                {
-                    Ok(Some(p)) => p,
-                    Ok(None) => {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "Missing arguments",
-                        )]));
-                    }
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Invalid parameters: {e}"
-                        ))]));
-                    }
+                let params: RefreshAssetStateRequest = match parse_args(request.arguments) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(e),
                 };
                 self.refresh_asset_state(params).await
             }
             "manual_clean_asset" => {
-                let params: ManualCleanAssetRequest = match request
-                    .arguments
-                    .map(|v| serde_json::from_value(serde_json::Value::Object(v)))
-                    .transpose()
-                {
-                    Ok(Some(p)) => p,
-                    Ok(None) => {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "Missing arguments",
-                        )]));
-                    }
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Invalid parameters: {e}"
-                        ))]));
-                    }
+                let params: ManualCleanAssetRequest = match parse_args(request.arguments) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(e),
                 };
                 self.manual_clean_asset(params).await
             }
@@ -1419,6 +1378,31 @@ impl ServerHandler for AdanMcpServer {
 }
 
 // ============================================================================
+// MCP Argument Parsing Helper
+// ============================================================================
+
+/// Parse arguments from CallToolRequestParam into a typed struct.
+/// Returns a CallToolResult error on failure, making it easy to use in call_tool handlers.
+fn parse_args<T: for<'de> serde::Deserialize<'de>>(
+    args: Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<T, CallToolResult> {
+    match args {
+        None => Err(CallToolResult::error(vec![Content::text(
+            "Missing arguments",
+        )])),
+        Some(map) => {
+            let value = serde_json::Value::Object(map);
+            match serde_json::from_value(value) {
+                Ok(parsed) => Ok(parsed),
+                Err(e) => Err(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid parameters: {e}"
+                ))])),
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -1433,7 +1417,7 @@ fn asset_to_info(asset: &AssetInstance) -> AssetInfo {
         id: asset.id.0.to_string(),
         name: asset.name.clone(),
         asset_type: asset.asset_type_id.0.to_string(),
-        state: format!("{:?}", asset.current_state),
+        state: format!("{:?}", asset.state()),
         level: format!("{:?}", asset.level),
     }
 }
@@ -1449,7 +1433,7 @@ fn matches_filters(asset: &AssetInstance, request: &QueryAssetsRequest) -> bool 
 
     // Filter by state
     if let Some(ref state) = request.state {
-        let asset_state = format!("{:?}", asset.current_state).to_lowercase();
+        let asset_state = format!("{:?}", asset.state()).to_lowercase();
         if !asset_state.contains(&state.to_lowercase()) {
             return false;
         }
@@ -1477,10 +1461,9 @@ fn matches_filters(asset: &AssetInstance, request: &QueryAssetsRequest) -> bool 
 mod tests {
     use super::*;
     use adam_domain::{
-        CreateAssetCommand, InMemoryAssetRepository, InMemoryDirtyQueueRepository,
+        AssetState, CreateAssetCommand, InMemoryAssetRepository, InMemoryDirtyQueueRepository,
         InMemoryVirtualInstanceRepository, Role,
     };
-    use async_trait::async_trait;
 
     fn create_test_state_with_role(role: Role) -> McpServerState {
         let org_id = OrganizationId::new();
@@ -1488,7 +1471,7 @@ mod tests {
 
         McpServerState {
             asset_repo: Arc::new(InMemoryAssetRepository::new()),
-            dependency_repo: Arc::new(InMemoryDependencyRepository::new()),
+            dependency_repo: Arc::new(adam_domain::InMemoryDependencyRepository::new()),
             dirty_repo: Arc::new(InMemoryDirtyQueueRepository::new()),
             virtual_repo: Arc::new(InMemoryVirtualInstanceRepository::new()),
             principal: AuthPrincipal {
@@ -1504,44 +1487,10 @@ mod tests {
         create_test_state_with_role(Role::Developer)
     }
 
-    /// Simple in-memory dependency repo for testing
-    struct InMemoryDependencyRepository;
-
-    impl InMemoryDependencyRepository {
-        fn new() -> Self {
-            Self
-        }
-    }
-
-    #[async_trait]
-    impl DependencyRepository for InMemoryDependencyRepository {
-        async fn find_downstream(
-            &self,
-            _asset_id: &AssetId,
-        ) -> Result<Vec<AssetId>, adam_domain::RepositoryError> {
-            Ok(vec![])
-        }
-
-        async fn find_upstream(
-            &self,
-            _asset_id: &AssetId,
-        ) -> Result<Vec<AssetId>, adam_domain::RepositoryError> {
-            Ok(vec![])
-        }
-
-        async fn create_dependency(
-            &self,
-            _source: &AssetId,
-            _target: &AssetId,
-        ) -> Result<(), adam_domain::RepositoryError> {
-            Ok(())
-        }
-    }
-
     #[tokio::test]
     async fn query_assets_tool_returns_assets() {
         let state = create_test_state();
-        let server = AdanMcpServer::new(state.clone());
+        let server = AdamMcpServer::new(state.clone());
 
         // Create a test project and assets
         let project_id = state.principal.project_memberships[0];
@@ -1585,7 +1534,7 @@ mod tests {
     #[tokio::test]
     async fn query_assets_with_name_filter() {
         let state = create_test_state();
-        let server = AdanMcpServer::new(state.clone());
+        let server = AdamMcpServer::new(state.clone());
 
         let project_id = state.principal.project_memberships[0];
         let org_id = state.principal.organization_id;
@@ -1645,7 +1594,7 @@ mod tests {
     async fn create_virtual_asset_denied_without_permission() {
         // Reader role does NOT have QueryVirtualContext permission
         let state = create_test_state_with_role(Role::Reader);
-        let server = AdanMcpServer::new(state.clone());
+        let server = AdamMcpServer::new(state.clone());
 
         let request = CreateVirtualAssetRequest {
             target_type: "code_commit".to_string(),
@@ -1666,7 +1615,7 @@ mod tests {
     #[tokio::test]
     async fn create_virtual_asset_with_valid_anchor() {
         let state = create_test_state();
-        let server = AdanMcpServer::new(state.clone());
+        let server = AdamMcpServer::new(state.clone());
 
         // Create an anchor asset
         let project_id = state.principal.project_memberships[0];
@@ -1716,7 +1665,7 @@ mod tests {
     #[tokio::test]
     async fn create_virtual_asset_with_invalid_anchor_returns_error() {
         let state = create_test_state();
-        let server = AdanMcpServer::new(state.clone());
+        let server = AdamMcpServer::new(state.clone());
 
         let request = CreateVirtualAssetRequest {
             target_type: "code_commit".to_string(),
@@ -1734,7 +1683,7 @@ mod tests {
     #[tokio::test]
     async fn create_virtual_asset_with_missing_anchor_returns_error() {
         let state = create_test_state();
-        let server = AdanMcpServer::new(state.clone());
+        let server = AdamMcpServer::new(state.clone());
 
         let request = CreateVirtualAssetRequest {
             target_type: "code_commit".to_string(),
@@ -1752,7 +1701,7 @@ mod tests {
     #[tokio::test]
     async fn create_virtual_asset_with_empty_anchors_returns_error() {
         let state = create_test_state();
-        let server = AdanMcpServer::new(state.clone());
+        let server = AdamMcpServer::new(state.clone());
 
         let request = CreateVirtualAssetRequest {
             target_type: "code_commit".to_string(),
@@ -1770,7 +1719,7 @@ mod tests {
     #[tokio::test]
     async fn create_virtual_asset_cross_project_denied() {
         let state = create_test_state();
-        let server = AdanMcpServer::new(state.clone());
+        let server = AdamMcpServer::new(state.clone());
 
         // Create anchor in project A
         let project_a = state.principal.project_memberships[0];
@@ -1810,7 +1759,7 @@ mod tests {
     #[tokio::test]
     async fn create_virtual_asset_persists_instance() {
         let state = create_test_state();
-        let server = AdanMcpServer::new(state.clone());
+        let server = AdamMcpServer::new(state.clone());
 
         let project_id = state.principal.project_memberships[0];
         let org_id = state.principal.organization_id;
@@ -1860,5 +1809,200 @@ mod tests {
         assert_eq!(instance.organization_id, org_id);
         assert_eq!(instance.created_by, "test-user");
         assert_eq!(instance.anchors.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn publish_asset_publishes_version() {
+        let state = create_test_state();
+        let server = AdamMcpServer::new(state.clone());
+
+        // Create an asset
+        let project_id = state.principal.project_memberships[0];
+        let org_id = state.principal.organization_id;
+        let asset = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Test Asset".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: Some(project_id),
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Project,
+                external_ref: "https://example.com/asset".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        let request = PublishAssetRequest {
+            asset_id: asset.id.0.to_string(),
+            version: Some("1.0.0".to_string()),
+            dependencies: None,
+        };
+
+        let result = server.publish_asset(request).await;
+        assert!(result.is_ok());
+
+        let tool_result = result.unwrap();
+        assert!(!tool_result.is_error.unwrap_or(true));
+    }
+
+    #[tokio::test]
+    async fn publish_asset_invalid_id_returns_error() {
+        let state = create_test_state();
+        let server = AdamMcpServer::new(state.clone());
+
+        let request = PublishAssetRequest {
+            asset_id: "invalid-uuid".to_string(),
+            version: Some("1.0.0".to_string()),
+            dependencies: None,
+        };
+
+        let result = server.publish_asset(request).await;
+        assert!(result.is_ok());
+
+        let tool_result = result.unwrap();
+        assert!(tool_result.is_error.unwrap_or(false));
+        let error_text = &tool_result.content[0].as_text().unwrap().text;
+        assert!(error_text.contains("Invalid asset_id"));
+    }
+
+    #[tokio::test]
+    async fn publish_asset_nonexistent_asset_returns_error() {
+        let state = create_test_state();
+        let server = AdamMcpServer::new(state.clone());
+
+        let request = PublishAssetRequest {
+            asset_id: uuid::Uuid::new_v4().to_string(),
+            version: Some("1.0.0".to_string()),
+            dependencies: None,
+        };
+
+        let result = server.publish_asset(request).await;
+        assert!(result.is_ok());
+
+        let tool_result = result.unwrap();
+        assert!(tool_result.is_error.unwrap_or(false));
+        let error_text = &tool_result.content[0].as_text().unwrap().text;
+        assert!(error_text.contains("Asset not found"));
+    }
+
+    #[tokio::test]
+    async fn publish_asset_without_permission_denied() {
+        // Reader role does NOT have VersionPublish permission
+        let state = create_test_state_with_role(Role::Reader);
+        let server = AdamMcpServer::new(state.clone());
+
+        // Create an asset
+        let project_id = state.principal.project_memberships[0];
+        let org_id = state.principal.organization_id;
+        let asset = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Test Asset".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: Some(project_id),
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Project,
+                external_ref: "https://example.com/asset".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        let request = PublishAssetRequest {
+            asset_id: asset.id.0.to_string(),
+            version: Some("1.0.0".to_string()),
+            dependencies: None,
+        };
+
+        let result = server.publish_asset(request).await;
+        assert!(result.is_ok());
+
+        let tool_result = result.unwrap();
+        assert!(tool_result.is_error.unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn publish_asset_propagates_to_downstream() {
+        let state = create_test_state();
+        let server = AdamMcpServer::new(state.clone());
+
+        // Create upstream asset
+        let project_id = state.principal.project_memberships[0];
+        let org_id = state.principal.organization_id;
+        let upstream = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Upstream Asset".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: Some(project_id),
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Project,
+                external_ref: "https://example.com/upstream".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        // Create downstream asset
+        let downstream = state
+            .asset_repo
+            .create(&CreateAssetCommand {
+                name: "Downstream Asset".to_string(),
+                asset_type_id: AssetTypeId::new(),
+                project_id: Some(project_id),
+                organization_id: org_id,
+                level: adam_domain::dependency::boundary::AssetLevel::Project,
+                external_ref: "https://example.com/downstream".to_string(),
+                source: "manual".to_string(),
+                metadata: serde_json::json!({}),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        // Create dependency: downstream depends on upstream
+        state
+            .dependency_repo
+            .create_dependency(&downstream.id, &upstream.id)
+            .await
+            .unwrap();
+
+        // Publish upstream asset
+        let request = PublishAssetRequest {
+            asset_id: upstream.id.0.to_string(),
+            version: Some("2.0.0".to_string()),
+            dependencies: None,
+        };
+
+        let result = server.publish_asset(request).await;
+        assert!(result.is_ok());
+
+        let tool_result = result.unwrap();
+        assert!(!tool_result.is_error.unwrap_or(true));
+
+        // Verify downstream asset is marked as dirty
+        let downstream_asset = state
+            .asset_repo
+            .find_by_id(&downstream.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(downstream_asset.state(), AssetState::Dirty);
+
+        // Verify dirty queue entry was created
+        let dirty_entries = state
+            .dirty_repo
+            .find_unresolved_by_asset(&downstream.id)
+            .await
+            .unwrap();
+        assert_eq!(dirty_entries.len(), 1);
+        assert_eq!(dirty_entries[0].upstream_version, "2.0.0");
     }
 }

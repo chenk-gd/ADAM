@@ -1,13 +1,13 @@
 use adam_domain::dependency::boundary::{AssetLevel, DependencyBoundaryContext, DependencyError};
-use uuid::Uuid;
+use adam_domain::{OrganizationId, ProjectId};
 
 fn create_test_context(
     source_level: AssetLevel,
     target_level: AssetLevel,
-    source_project_id: Option<Uuid>,
-    target_project_id: Option<Uuid>,
-    source_org_id: Uuid,
-    target_org_id: Uuid,
+    source_project_id: Option<ProjectId>,
+    target_project_id: Option<ProjectId>,
+    source_org_id: OrganizationId,
+    target_org_id: OrganizationId,
 ) -> DependencyBoundaryContext {
     DependencyBoundaryContext {
         source_level,
@@ -21,11 +21,11 @@ fn create_test_context(
 
 #[test]
 fn project_asset_cannot_depend_on_organization_asset() {
-    let org_id = Uuid::new_v4();
+    let org_id = OrganizationId::new();
     let ctx = create_test_context(
         AssetLevel::Project,
         AssetLevel::Organization,
-        Some(Uuid::new_v4()),
+        Some(ProjectId::new()),
         None,
         org_id,
         org_id,
@@ -38,12 +38,12 @@ fn project_asset_cannot_depend_on_organization_asset() {
 
 #[test]
 fn organization_asset_cannot_depend_on_project_asset() {
-    let org_id = Uuid::new_v4();
+    let org_id = OrganizationId::new();
     let ctx = create_test_context(
         AssetLevel::Organization,
         AssetLevel::Project,
         None,
-        Some(Uuid::new_v4()),
+        Some(ProjectId::new()),
         org_id,
         org_id,
     );
@@ -55,8 +55,8 @@ fn organization_asset_cannot_depend_on_project_asset() {
 
 #[test]
 fn same_project_dependency_is_valid() {
-    let org_id = Uuid::new_v4();
-    let project_id = Uuid::new_v4();
+    let org_id = OrganizationId::new();
+    let project_id = ProjectId::new();
     let ctx = create_test_context(
         AssetLevel::Project,
         AssetLevel::Project,
@@ -70,9 +70,9 @@ fn same_project_dependency_is_valid() {
 
 #[test]
 fn cross_project_dependency_is_invalid() {
-    let org_id = Uuid::new_v4();
-    let project_a = Uuid::new_v4();
-    let project_b = Uuid::new_v4();
+    let org_id = OrganizationId::new();
+    let project_a = ProjectId::new();
+    let project_b = ProjectId::new();
     let ctx = create_test_context(
         AssetLevel::Project,
         AssetLevel::Project,
@@ -89,7 +89,7 @@ fn cross_project_dependency_is_invalid() {
 
 #[test]
 fn same_organization_org_level_dependency_is_valid() {
-    let org_id = Uuid::new_v4();
+    let org_id = OrganizationId::new();
     let ctx = create_test_context(
         AssetLevel::Organization,
         AssetLevel::Organization,
@@ -103,8 +103,8 @@ fn same_organization_org_level_dependency_is_valid() {
 
 #[test]
 fn cross_organization_dependency_is_invalid() {
-    let org_a = Uuid::new_v4();
-    let org_b = Uuid::new_v4();
+    let org_a = OrganizationId::new();
+    let org_b = OrganizationId::new();
     let ctx = create_test_context(
         AssetLevel::Organization,
         AssetLevel::Organization,
@@ -121,12 +121,12 @@ fn cross_organization_dependency_is_invalid() {
 
 #[test]
 fn project_asset_without_project_id_is_invalid() {
-    let org_id = Uuid::new_v4();
+    let org_id = OrganizationId::new();
     let ctx = create_test_context(
         AssetLevel::Project,
         AssetLevel::Project,
         None, // Missing project ID
-        Some(Uuid::new_v4()),
+        Some(ProjectId::new()),
         org_id,
         org_id,
     );
@@ -138,11 +138,11 @@ fn project_asset_without_project_id_is_invalid() {
 
 #[test]
 fn organization_asset_with_project_id_is_invalid() {
-    let org_id = Uuid::new_v4();
+    let org_id = OrganizationId::new();
     let ctx = create_test_context(
         AssetLevel::Organization,
         AssetLevel::Organization,
-        Some(Uuid::new_v4()), // Should be None
+        Some(ProjectId::new()), // Should be None
         None,
         org_id,
         org_id,

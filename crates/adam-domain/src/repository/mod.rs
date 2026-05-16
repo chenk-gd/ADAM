@@ -40,6 +40,14 @@ pub struct CreateAssetCommand {
     pub idempotency_key: Option<String>,
 }
 
+/// Command for updating an asset
+#[derive(Debug, Clone)]
+pub struct UpdateAssetCommand {
+    pub name: Option<String>,
+    pub assignees: Option<Vec<String>>,
+    pub metadata: Option<serde_json::Value>,
+}
+
 /// Repository trait for asset instances
 #[async_trait]
 pub trait AssetRepository: Send + Sync {
@@ -48,6 +56,13 @@ pub trait AssetRepository: Send + Sync {
 
     /// Find asset by ID
     async fn find_by_id(&self, id: &AssetId) -> Result<Option<AssetInstance>, RepositoryError>;
+
+    /// Update asset
+    async fn update(
+        &self,
+        id: &AssetId,
+        cmd: &UpdateAssetCommand,
+    ) -> Result<AssetInstance, RepositoryError>;
 
     /// Update asset state
     async fn update_state(&self, id: &AssetId, state: AssetState) -> Result<(), RepositoryError>;
@@ -63,6 +78,9 @@ pub trait AssetRepository: Send + Sync {
         &self,
         org_id: &crate::asset::instance::OrganizationId,
     ) -> Result<Vec<AssetInstance>, RepositoryError>;
+
+    /// Delete asset by ID
+    async fn delete(&self, id: &AssetId) -> Result<(), RepositoryError>;
 }
 
 /// Entry in the dirty queue for tracking upstream changes
@@ -72,6 +90,12 @@ pub struct DirtyQueueEntry {
     pub asset_id: AssetId,
     pub upstream_asset_id: AssetId,
     pub upstream_version: String,
+    /// Previous version of upstream asset before this change
+    pub upstream_old_version: String,
+    /// Impact level: "low", "medium", "high", "critical"
+    pub impact_level: String,
+    /// When the dirty state was triggered
+    pub since: chrono::DateTime<chrono::Utc>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub resolved_at: Option<chrono::DateTime<chrono::Utc>>,
 }

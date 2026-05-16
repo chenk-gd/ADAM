@@ -105,6 +105,17 @@ Key sections:
 - Section 6: API endpoints
 - Section 7: Business rules (DAG validation, state propagation, etc.)
 
+## Agent skills
+
+### Issue tracker
+GitHub (chenk-gd/ADAM). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+Default vocabulary (needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+Single-context layout. See `docs/agents/domain.md`.
+
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 

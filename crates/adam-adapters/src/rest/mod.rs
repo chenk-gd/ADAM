@@ -3,14 +3,14 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::{
-    cors::{Any, CorsLayer},
+    cors::CorsLayer,
     trace::{DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
@@ -18,8 +18,9 @@ use uuid::Uuid;
 
 use adam_application::services::state_propagator::{StatePropagationError, StatePropagator};
 use adam_domain::{
-    AssetId, AssetInstance, AssetRepository, AssetState, AssetTypeId, AuthPrincipal, CreateAssetCommand,
-    AssetTypeRepository, DependencyRepository, DirtyQueueRepository, OrganizationId, ProjectId, RepositoryError, Role,
+    AssetId, AssetInstance, AssetRepository, AssetState, AssetTypeId, AssetTypeRepository,
+    AuthPrincipal, AuthorizationError, CreateAssetCommand, DependencyRepository,
+    DirtyQueueRepository, OrganizationId, ProjectId, RepositoryError, Role,
 };
 
 // ============================================================================
@@ -257,6 +258,12 @@ pub struct AssetResponse {
     pub project_id: Option<Uuid>,
     pub level: AssetLevelDto,
     pub current_state: AssetStateDto,
+    pub external_ref: String,
+    pub source: String,
+    pub metadata: serde_json::Value,
+    pub assignees: Vec<String>,
+    pub publisher: Option<String>,
+    pub current_version: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -282,6 +289,19 @@ impl From<AssetState> for AssetStateDto {
 
 impl From<AssetInstance> for AssetResponse {
     fn from(asset: AssetInstance) -> Self {
+        // Clone fields that need to be accessed after partial moves
+        let external_ref = asset.external_ref.clone();
+        let source = asset.source.clone();
+        let metadata = asset.metadata.clone();
+        let assignees = asset.assignees.clone();
+        let created_at = asset.created_at;
+
+        // Call borrowing methods
+        let state = asset.state();
+        let updated_at = asset.updated_at();
+        let publisher = asset.publisher().map(|s| s.to_string());
+        let current_version = asset.current_version().map(|s| s.to_string());
+
         AssetResponse {
             id: asset.id.0,
             name: asset.name,
@@ -294,9 +314,15 @@ impl From<AssetInstance> for AssetResponse {
                     AssetLevelDto::Organization
                 }
             },
-            current_state: asset.current_state.into(),
-            created_at: asset.created_at,
-            updated_at: asset.updated_at,
+            current_state: state.into(),
+            external_ref,
+            source,
+            metadata,
+            assignees,
+            publisher,
+            current_version,
+            created_at,
+            updated_at,
         }
     }
 }
@@ -412,27 +438,6 @@ pub struct AppState {
 // Authorization
 // ============================================================================
 
-/// Authorization errors
-#[derive(Debug, thiserror::Error)]
-pub enum AuthorizationError {
-    #[error("Cross-organization access denied")]
-    CrossOrganizationAccessDenied,
-    #[error("Project access denied")]
-    ProjectAccessDenied(ProjectId),
-    #[error("Permission denied")]
-    PermissionDenied,
-}
-
-impl IntoResponse for AuthorizationError {
-    fn into_response(self) -> axum::response::Response {
-        let status = StatusCode::FORBIDDEN;
-        let body = Json(ErrorResponse {
-            error: self.to_string(),
-        });
-        (status, body).into_response()
-    }
-}
-
 /// Check if principal can access an asset
 fn check_asset_access(
     principal: &AuthPrincipal,
@@ -510,13 +515,38 @@ pub async fn create_asset(
         idempotency_key: req.idempotency_key,
     };
 
-    // TODO: Validate dependencies if provided
-
     let asset = state
         .asset_repo
         .create(&cmd)
         .await
         .map_err(ApiError::from)?;
+
+    // Create dependencies if provided
+    if let Some(dependency_ids) = req.dependencies {
+        for dep_id in dependency_ids {
+            let target_id = AssetId::from_uuid(dep_id);
+
+            // Verify the target asset exists
+            if state
+                .asset_repo
+                .find_by_id(&target_id)
+                .await
+                .map_err(ApiError::from)?
+                .is_none()
+            {
+                return Err(ApiError::BadRequest(format!(
+                    "Dependency asset not found: {dep_id}"
+                )));
+            }
+
+            // Create the dependency relationship
+            state
+                .dependency_repo
+                .create_dependency(&asset.id, &target_id)
+                .await
+                .map_err(ApiError::from)?;
+        }
+    }
 
     Ok((StatusCode::CREATED, Json(asset.into())))
 }
@@ -601,9 +631,9 @@ pub async fn list_assets(
             // Filter by state
             if let Some(ref state_str) = query.state {
                 let matches = match state_str.as_str() {
-                    "clean" => a.current_state == AssetState::Clean,
-                    "dirty" => a.current_state == AssetState::Dirty,
-                    "archived" => a.current_state == AssetState::Archived,
+                    "clean" => a.state() == AssetState::Clean,
+                    "dirty" => a.state() == AssetState::Dirty,
+                    "archived" => a.state() == AssetState::Archived,
                     _ => true,
                 };
                 if !matches {
@@ -732,12 +762,18 @@ pub async fn create_asset_type(
     Json(req): Json<CreateAssetTypeRequest>,
 ) -> Result<(StatusCode, Json<AssetTypeResponse>), ApiError> {
     // Check permission
-    if !auth.principal.has_permission(adam_domain::auth::Permission::AssetTypeCreate) {
-        return Err(ApiError::Forbidden("AssetTypeCreate permission required".to_string()));
+    if !auth
+        .principal
+        .has_permission(adam_domain::auth::Permission::AssetTypeCreate)
+    {
+        return Err(ApiError::Forbidden(
+            "AssetTypeCreate permission required".to_string(),
+        ));
     }
 
     // Create asset type
     let asset_type = adam_domain::AssetType::new(
+        auth.principal.organization_id,
         req.name,
         req.display_name,
         req.description,
@@ -745,7 +781,10 @@ pub async fn create_asset_type(
     );
 
     // Save to repository
-    let created = state.asset_type_repo.create(&asset_type).await
+    let created = state
+        .asset_type_repo
+        .create(&asset_type)
+        .await
         .map_err(ApiError::from)?;
 
     Ok((StatusCode::CREATED, Json(created.into())))
@@ -757,12 +796,20 @@ pub async fn list_asset_types(
     ExtractAuth(auth): ExtractAuth,
 ) -> Result<Json<Vec<AssetTypeResponse>>, ApiError> {
     // Check permission
-    if !auth.principal.has_permission(adam_domain::auth::Permission::AssetTypeRead) {
-        return Err(ApiError::Forbidden("AssetTypeRead permission required".to_string()));
+    if !auth
+        .principal
+        .has_permission(adam_domain::auth::Permission::AssetTypeRead)
+    {
+        return Err(ApiError::Forbidden(
+            "AssetTypeRead permission required".to_string(),
+        ));
     }
 
     // Query from repository
-    let asset_types = state.asset_type_repo.list_all().await
+    let asset_types = state
+        .asset_type_repo
+        .list_all()
+        .await
         .map_err(ApiError::from)?;
 
     Ok(Json(asset_types.into_iter().map(|at| at.into()).collect()))
@@ -773,12 +820,15 @@ pub async fn update_asset(
     State(state): State<AppState>,
     ExtractAuth(auth): ExtractAuth,
     Path(id): Path<Uuid>,
-    Json(_req): Json<UpdateAssetRequest>,
+    Json(req): Json<UpdateAssetRequest>,
 ) -> Result<Json<AssetResponse>, ApiError> {
     let asset_id = AssetId::from_uuid(id);
 
     // Get existing asset
-    let asset = state.asset_repo.find_by_id(&asset_id).await
+    let asset = state
+        .asset_repo
+        .find_by_id(&asset_id)
+        .await
         .map_err(ApiError::from)?
         .ok_or(ApiError::NotFound)?;
 
@@ -796,13 +846,29 @@ pub async fn update_asset(
     }
 
     // Check permission
-    if !auth.principal.has_permission(adam_domain::auth::Permission::AssetUpdate) {
-        return Err(ApiError::Forbidden("AssetUpdate permission required".to_string()));
+    if !auth
+        .principal
+        .has_permission(adam_domain::auth::Permission::AssetUpdate)
+    {
+        return Err(ApiError::Forbidden(
+            "AssetUpdate permission required".to_string(),
+        ));
     }
 
-    // TODO: Actually update the asset fields
-    // For now, return the existing asset (read-only for safety)
-    Ok(Json(asset.into()))
+    // Update the asset
+    let cmd = adam_domain::UpdateAssetCommand {
+        name: req.name,
+        assignees: req.assignees,
+        metadata: req.metadata,
+    };
+
+    let updated = state
+        .asset_repo
+        .update(&asset_id, &cmd)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(updated.into()))
 }
 
 /// Delete asset (FR-008)
@@ -814,7 +880,10 @@ pub async fn delete_asset(
     let asset_id = AssetId::from_uuid(id);
 
     // Get asset
-    let asset = state.asset_repo.find_by_id(&asset_id).await
+    let asset = state
+        .asset_repo
+        .find_by_id(&asset_id)
+        .await
         .map_err(ApiError::from)?
         .ok_or(ApiError::NotFound)?;
 
@@ -831,12 +900,36 @@ pub async fn delete_asset(
         });
     }
 
-    if !auth.principal.has_permission(adam_domain::auth::Permission::AssetDelete) {
-        return Err(ApiError::Forbidden("AssetDelete permission required".to_string()));
+    if !auth
+        .principal
+        .has_permission(adam_domain::auth::Permission::AssetDelete)
+    {
+        return Err(ApiError::Forbidden(
+            "AssetDelete permission required".to_string(),
+        ));
     }
 
-    // TODO: Check downstream dependencies before deleting
-    // For now, return success (no-op for safety)
+    // Check downstream dependencies before deleting
+    let downstream = state
+        .dependency_repo
+        .find_downstream(&asset_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    if !downstream.is_empty() {
+        return Err(ApiError::Conflict(format!(
+            "Cannot delete asset with {} downstream dependencies",
+            downstream.len()
+        )));
+    }
+
+    // Delete the asset
+    state
+        .asset_repo
+        .delete(&asset_id)
+        .await
+        .map_err(ApiError::from)?;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -849,11 +942,17 @@ pub fn create_router(state: AppState) -> Router {
     // Protected routes - require authentication
     let protected_routes = Router::new()
         .route("/api/v1/assets", post(create_asset).get(list_assets))
-        .route("/api/v1/assets/{id}", get(get_asset).put(update_asset).delete(delete_asset))
+        .route(
+            "/api/v1/assets/{id}",
+            get(get_asset).put(update_asset).delete(delete_asset),
+        )
         .route("/api/v1/assets/{id}/publish", post(publish_asset))
         .route("/api/v1/assets/{id}/resolve", post(resolve_dirty))
         // AssetType routes (FR-001/002)
-        .route("/api/v1/asset-types", post(create_asset_type).get(list_asset_types));
+        .route(
+            "/api/v1/asset-types",
+            post(create_asset_type).get(list_asset_types),
+        );
 
     // Public routes (if any) would go here
     let public_routes = Router::new().route("/health", get(health_check));
@@ -861,12 +960,18 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .merge(protected_routes)
         .merge(public_routes)
-        // Add CORS layer
+        // Add CORS layer with restricted configuration
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
+                .allow_origin([
+                    "http://localhost:3000".parse().unwrap(),
+                    "http://localhost:8080".parse().unwrap(),
+                ])
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+                .allow_headers([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::CONTENT_TYPE,
+                ]),
         )
         // Add tracing layer
         .layer(
@@ -1021,7 +1126,8 @@ mod tests {
 
         let org_id = Uuid::new_v4();
         let project_id = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[Role::Developer], &[project_id]);
+        let (auth_header, auth_value) =
+            test_auth_header(org_id, "user-123", &[Role::Developer], &[project_id]);
 
         let response = app
             .oneshot(
@@ -1063,7 +1169,8 @@ mod tests {
         let app = create_router(state);
 
         let org_id = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[Role::Developer], &[]);
+        let (auth_header, auth_value) =
+            test_auth_header(org_id, "user-123", &[Role::Developer], &[]);
 
         let response = app
             .oneshot(
@@ -1124,7 +1231,8 @@ mod tests {
         let asset = state.asset_repo.create(&cmd).await.unwrap();
 
         let app = create_router(state);
-        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-123", &[Role::Developer], &[]);
+        let (auth_header, auth_value) =
+            test_auth_header(org_id.0, "user-123", &[Role::Developer], &[]);
 
         let response = app
             .oneshot(
@@ -1153,7 +1261,8 @@ mod tests {
         let app = create_router(state);
 
         let org_id = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[Role::Developer], &[]);
+        let (auth_header, auth_value) =
+            test_auth_header(org_id, "user-123", &[Role::Developer], &[]);
 
         let response = app
             .oneshot(
@@ -1176,7 +1285,8 @@ mod tests {
         let app = create_router(state);
 
         let org_id = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[Role::Developer], &[]);
+        let (auth_header, auth_value) =
+            test_auth_header(org_id, "user-123", &[Role::Developer], &[]);
 
         // Without project_id query param, should fail (400 - missing required param)
         let response = app
@@ -1231,7 +1341,8 @@ mod tests {
 
         let app = create_router(state);
         // User must be a member of the project to list its assets
-        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-123", &[Role::Developer], &[project_id.0]);
+        let (auth_header, auth_value) =
+            test_auth_header(org_id.0, "user-123", &[Role::Developer], &[project_id.0]);
 
         let response = app
             .oneshot(
@@ -1306,6 +1417,9 @@ mod tests {
             asset_id: created_asset.id,
             upstream_asset_id: AssetId::new(),
             upstream_version: "v1.0.0".to_string(),
+            upstream_old_version: "0.0.0".to_string(),
+            impact_level: "medium".to_string(),
+            since: chrono::Utc::now(),
             created_at: chrono::Utc::now(),
             resolved_at: None,
         };
@@ -1319,7 +1433,8 @@ mod tests {
             .unwrap();
 
         let app = create_router(state.clone());
-        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-123", &[Role::Developer], &[]);
+        let (auth_header, auth_value) =
+            test_auth_header(org_id.0, "user-123", &[Role::Developer], &[]);
 
         let response = app
             .oneshot(
@@ -1351,7 +1466,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(updated.current_state, AssetState::Clean);
+        assert_eq!(updated.state(), AssetState::Clean);
     }
 
     #[tokio::test]
@@ -1389,7 +1504,8 @@ mod tests {
         let org_id = Uuid::new_v4();
         let project1 = Uuid::new_v4();
         let project2 = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[Role::Developer], &[project1]);
+        let (auth_header, auth_value) =
+            test_auth_header(org_id, "user-123", &[Role::Developer], &[project1]);
 
         // Try to create asset in project2 (not a member)
         let response = app
@@ -1444,7 +1560,8 @@ mod tests {
 
         // User from org2 tries to access
         let org2_id = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org2_id, "user-456", &[Role::Developer], &[]);
+        let (auth_header, auth_value) =
+            test_auth_header(org2_id, "user-456", &[Role::Developer], &[]);
 
         let response = app
             .oneshot(
@@ -1488,7 +1605,8 @@ mod tests {
 
         // User is member of different project
         let other_project = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id.0, "user-456", &[Role::Developer], &[other_project]);
+        let (auth_header, auth_value) =
+            test_auth_header(org_id.0, "user-456", &[Role::Developer], &[other_project]);
 
         let response = app
             .oneshot(
@@ -1514,7 +1632,8 @@ mod tests {
         let org_id = Uuid::new_v4();
         let project1 = Uuid::new_v4();
         let project2 = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id, "user-123", &[Role::Developer], &[project1]);
+        let (auth_header, auth_value) =
+            test_auth_header(org_id, "user-123", &[Role::Developer], &[project1]);
 
         // Try to list assets for project2 (not a member)
         let response = app
@@ -1540,7 +1659,8 @@ mod tests {
         // User is NOT member of any project but has OrgAdmin role
         let org_id = Uuid::new_v4();
         let project_id = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id, "org-admin", &[Role::OrgAdmin], &[]);
+        let (auth_header, auth_value) =
+            test_auth_header(org_id, "org-admin", &[Role::OrgAdmin], &[]);
 
         // Try to list assets for project (not a member, but OrgAdmin)
         let response = app
@@ -1567,7 +1687,8 @@ mod tests {
         // User is NOT member of any project but has SystemAdmin role
         let org_id = Uuid::new_v4();
         let project_id = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org_id, "sys-admin", &[Role::SystemAdmin], &[]);
+        let (auth_header, auth_value) =
+            test_auth_header(org_id, "sys-admin", &[Role::SystemAdmin], &[]);
 
         // Try to list assets for project (not a member, but SystemAdmin)
         let response = app
@@ -1613,13 +1734,17 @@ mod tests {
 
         // OrgAdmin from org2 (different org) tries to access
         let org2_id = Uuid::new_v4();
-        let (auth_header, auth_value) = test_auth_header(org2_id, "org-admin", &[Role::OrgAdmin], &[]);
+        let (auth_header, auth_value) =
+            test_auth_header(org2_id, "org-admin", &[Role::OrgAdmin], &[]);
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri(format!("/api/v1/assets/{}?project_id={}", asset.id.0, project1_id.0))
+                    .uri(format!(
+                        "/api/v1/assets/{}?project_id={}",
+                        asset.id.0, project1_id.0
+                    ))
                     .header(&auth_header, &auth_value)
                     .body(Body::empty())
                     .unwrap(),

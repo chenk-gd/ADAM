@@ -2,9 +2,9 @@
 //!
 //! Enforces BR-008: Organization boundary and asset level constraints
 
+use crate::asset::instance::{OrganizationId, ProjectId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use uuid::Uuid;
 
 /// Asset level enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -46,13 +46,13 @@ pub struct DependencyBoundaryContext {
     /// Level of the target asset (dependency)
     pub target_level: AssetLevel,
     /// Project ID of the source asset (if project-level)
-    pub source_project_id: Option<Uuid>,
+    pub source_project_id: Option<ProjectId>,
     /// Project ID of the target asset (if project-level)
-    pub target_project_id: Option<Uuid>,
+    pub target_project_id: Option<ProjectId>,
     /// Organization ID of the source asset
-    pub source_org_id: Uuid,
+    pub source_org_id: OrganizationId,
     /// Organization ID of the target asset
-    pub target_org_id: Uuid,
+    pub target_org_id: OrganizationId,
 }
 
 impl DependencyBoundaryContext {
@@ -115,10 +115,10 @@ mod tests {
     fn ctx(
         source_level: AssetLevel,
         target_level: AssetLevel,
-        source_project: Option<Uuid>,
-        target_project: Option<Uuid>,
-        source_org: Uuid,
-        target_org: Uuid,
+        source_project: Option<ProjectId>,
+        target_project: Option<ProjectId>,
+        source_org: OrganizationId,
+        target_org: OrganizationId,
     ) -> DependencyBoundaryContext {
         DependencyBoundaryContext {
             source_level,
@@ -132,8 +132,8 @@ mod tests {
 
     #[test]
     fn test_same_project_is_valid() {
-        let org = Uuid::new_v4();
-        let project = Uuid::new_v4();
+        let org = OrganizationId::new();
+        let project = ProjectId::new();
         let context = ctx(
             AssetLevel::Project,
             AssetLevel::Project,
@@ -147,9 +147,9 @@ mod tests {
 
     #[test]
     fn test_cross_project_is_invalid() {
-        let org = Uuid::new_v4();
-        let project_a = Uuid::new_v4();
-        let project_b = Uuid::new_v4();
+        let org = OrganizationId::new();
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
         let context = ctx(
             AssetLevel::Project,
             AssetLevel::Project,
@@ -166,11 +166,11 @@ mod tests {
 
     #[test]
     fn test_project_cannot_depend_on_organization() {
-        let org = Uuid::new_v4();
+        let org = OrganizationId::new();
         let context = ctx(
             AssetLevel::Project,
             AssetLevel::Organization,
-            Some(Uuid::new_v4()),
+            Some(ProjectId::new()),
             None,
             org,
             org,
@@ -183,12 +183,12 @@ mod tests {
 
     #[test]
     fn test_organization_cannot_depend_on_project() {
-        let org = Uuid::new_v4();
+        let org = OrganizationId::new();
         let context = ctx(
             AssetLevel::Organization,
             AssetLevel::Project,
             None,
-            Some(Uuid::new_v4()),
+            Some(ProjectId::new()),
             org,
             org,
         );
@@ -200,8 +200,8 @@ mod tests {
 
     #[test]
     fn test_cross_organization_is_invalid() {
-        let org_a = Uuid::new_v4();
-        let org_b = Uuid::new_v4();
+        let org_a = OrganizationId::new();
+        let org_b = OrganizationId::new();
         let context = ctx(
             AssetLevel::Organization,
             AssetLevel::Organization,
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_same_organization_org_level_is_valid() {
-        let org = Uuid::new_v4();
+        let org = OrganizationId::new();
         let context = ctx(
             AssetLevel::Organization,
             AssetLevel::Organization,
