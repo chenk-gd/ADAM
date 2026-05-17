@@ -71,6 +71,35 @@ impl AssetType {
         }
     }
 
+    /// Recreate an asset type from persisted fields.
+    pub fn new_with_fields(
+        id: AssetTypeId,
+        organization_id: OrganizationId,
+        name: String,
+        display_name: String,
+        description: String,
+        metadata_schema: serde_json::Value,
+        version_strategy: VersionStrategy,
+        retention_policy: Option<serde_json::Value>,
+        icon: Option<String>,
+        created_at: chrono::DateTime<chrono::Utc>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        Self {
+            id,
+            organization_id,
+            name,
+            display_name,
+            description,
+            metadata_schema,
+            version_strategy,
+            retention_policy,
+            icon,
+            created_at,
+            updated_at,
+        }
+    }
+
     /// Set version strategy
     pub fn with_version_strategy(mut self, strategy: VersionStrategy) -> Self {
         self.version_strategy = strategy;
