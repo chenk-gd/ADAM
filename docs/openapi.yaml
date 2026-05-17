@@ -3,285 +3,397 @@ info:
   title: ADAM REST API
   description: Research and Development Asset Management System REST API
   version: 0.1.0
-  contact:
-    name: ADAM Team
 
 servers:
-  - url: http://localhost:8080
+  - url: http://localhost:3000
     description: Local development server
+
+security:
+  - bearerAuth: []
 
 paths:
   /health:
     get:
-      summary: Health check
-      description: Public endpoint for service health monitoring
       operationId: healthCheck
-      tags:
-        - System
+      tags: [System]
+      security: []
       responses:
-        '200':
+        "200":
           description: Service is healthy
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HealthResponse'
+                $ref: "#/components/schemas/HealthResponse"
 
-  /api/v1/assets:
+  /api/v1/asset-types:
     get:
-      summary: List assets
-      description: |
-        Retrieves assets for a specific project, including both project-level
-        and organization-level assets (per FR-026).
-      operationId: listAssets
-      tags:
-        - Assets
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: project_id
-          in: query
-          required: true
-          description: UUID of the project to query
-          schema:
-            type: string
-            format: uuid
+      operationId: listAssetTypes
+      tags: [AssetTypes]
       responses:
-        '200':
-          description: Assets retrieved successfully
+        "200":
+          description: Asset types
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/AssetResponse'
-        '400':
-          description: Missing required project_id parameter
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
+                  $ref: "#/components/schemas/AssetTypeResponse"
     post:
-      summary: Create asset
-      description: Creates a new asset instance
-      operationId: createAsset
-      tags:
-        - Assets
-      security:
-        - bearerAuth: []
+      operationId: createAssetType
+      tags: [AssetTypes]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateAssetRequest'
+              $ref: "#/components/schemas/CreateAssetTypeRequest"
       responses:
-        '201':
-          description: Asset created successfully
+        "201":
+          description: Asset type created
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AssetResponse'
-        '400':
-          description: Invalid request body
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '409':
-          description: Duplicate idempotency key
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '422':
-          description: Validation error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: "#/components/schemas/AssetTypeResponse"
 
-  /api/v1/assets/{id}:
+  /api/v1/assets:
     get:
-      summary: Get asset
-      description: Retrieves a specific asset by ID
-      operationId: getAsset
-      tags:
-        - Assets
-      security:
-        - bearerAuth: []
+      operationId: listAssets
+      tags: [Assets]
       parameters:
-        - name: id
-          in: path
+        - name: project_id
+          in: query
           required: true
-          description: Asset UUID
           schema:
             type: string
             format: uuid
+        - name: asset_type
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: state
+          in: query
+          schema:
+            type: string
+        - name: name_contains
+          in: query
+          schema:
+            type: string
+        - name: assignee
+          in: query
+          schema:
+            type: string
       responses:
-        '200':
-          description: Asset found
+        "200":
+          description: Assets
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AssetResponse'
-        '401':
-          description: Unauthorized
+                $ref: "#/components/schemas/PaginatedAssets"
+    post:
+      operationId: createAsset
+      tags: [Assets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAssetRequest"
+      responses:
+        "201":
+          description: Asset created
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '404':
-          description: Asset not found
+                $ref: "#/components/schemas/AssetResponse"
+
+  /api/v1/assets/{id}:
+    parameters:
+      - $ref: "#/components/parameters/AssetId"
+    get:
+      operationId: getAsset
+      tags: [Assets]
+      responses:
+        "200":
+          description: Asset
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: "#/components/schemas/AssetResponse"
+    put:
+      operationId: updateAsset
+      tags: [Assets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAssetRequest"
+      responses:
+        "200":
+          description: Updated asset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetResponse"
+    delete:
+      operationId: deleteAsset
+      tags: [Assets]
+      responses:
+        "204":
+          description: Deleted
+
+  /api/v1/assets/{id}/archive:
+    post:
+      operationId: archiveAsset
+      tags: [Assets]
+      parameters:
+        - $ref: "#/components/parameters/AssetId"
+      responses:
+        "204":
+          description: Archived
+
+  /api/v1/assets/{id}/releases:
+    post:
+      operationId: releaseAsset
+      tags: [Versions]
+      parameters:
+        - $ref: "#/components/parameters/AssetId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishRequest"
+      responses:
+        "200":
+          description: Published
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishResponse"
 
   /api/v1/assets/{id}/publish:
     post:
-      summary: Publish asset version
-      description: |
-        Publishes a new version of an asset, triggering dirty state
-        propagation to downstream dependencies.
-      operationId: publishAsset
-      tags:
-        - Assets
-        - Versions
-      security:
-        - bearerAuth: []
+      operationId: publishAssetCompatibility
+      tags: [Versions]
+      description: Compatibility alias for /api/v1/assets/{id}/releases.
       parameters:
-        - name: id
-          in: path
-          required: true
-          description: Asset UUID
-          schema:
-            type: string
-            format: uuid
+        - $ref: "#/components/parameters/AssetId"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/PublishRequest'
+              $ref: "#/components/schemas/PublishRequest"
       responses:
-        '200':
-          description: Published successfully
+        "200":
+          description: Published
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PublishResponse'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '404':
-          description: Asset not found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '409':
-          description: Cannot publish archived asset
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: "#/components/schemas/PublishResponse"
+
+  /api/v1/assets/{id}/manual-clean:
+    post:
+      operationId: manualCleanAsset
+      tags: [DirtyQueue]
+      parameters:
+        - $ref: "#/components/parameters/AssetId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveRequest"
+      responses:
+        "204":
+          description: Clean review accepted
 
   /api/v1/assets/{id}/resolve:
     post:
-      summary: Resolve dirty state
-      description: |
-        Marks an asset's dirty state as resolved after reviewing
-        upstream changes.
-      operationId: resolveDirty
-      tags:
-        - Assets
-        - Dirty Queue
-      security:
-        - bearerAuth: []
+      operationId: resolveDirtyCompatibility
+      tags: [DirtyQueue]
+      description: Compatibility alias for /api/v1/assets/{id}/manual-clean.
       parameters:
-        - name: id
-          in: path
-          required: true
-          description: Asset UUID
-          schema:
-            type: string
-            format: uuid
+        - $ref: "#/components/parameters/AssetId"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ResolveRequest'
+              $ref: "#/components/schemas/ResolveRequest"
       responses:
-        '204':
-          description: Resolved successfully
-        '401':
-          description: Unauthorized
+        "204":
+          description: Clean review accepted
+
+  /api/v1/assets/{id}/versions:
+    get:
+      operationId: listAssetVersions
+      tags: [Versions]
+      parameters:
+        - $ref: "#/components/parameters/AssetId"
+      responses:
+        "200":
+          description: Versions
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '404':
-          description: Asset or dirty queue entry not found
+                type: array
+                items:
+                  $ref: "#/components/schemas/AssetVersionResponse"
+
+  /api/v1/assets/{id}/versions/{version}:
+    get:
+      operationId: getAssetVersion
+      tags: [Versions]
+      parameters:
+        - $ref: "#/components/parameters/AssetId"
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Version
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: "#/components/schemas/AssetVersionResponse"
+
+  /api/v1/assets/{id}/dependencies:
+    get:
+      operationId: listAssetDependencies
+      tags: [Dependencies]
+      parameters:
+        - $ref: "#/components/parameters/AssetId"
+      responses:
+        "200":
+          description: Upstream dependencies
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AssetDependencyResponse"
+
+  /api/v1/assets/{id}/dependency-graph:
+    get:
+      operationId: getDependencyGraph
+      tags: [Dependencies]
+      parameters:
+        - $ref: "#/components/parameters/AssetId"
+      responses:
+        "200":
+          description: Direct dependency graph
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DependencyGraphResponse"
 
 components:
+  parameters:
+    AssetId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
   schemas:
-    CreateAssetRequest:
+    CreateAssetTypeRequest:
       type: object
-      required:
-        - name
-        - asset_type_id
-        - level
+      required: [name, display_name, description, metadata_schema]
       properties:
         name:
           type: string
-          description: Asset name
-          example: "User Service API"
+        display_name:
+          type: string
+        description:
+          type: string
+        metadata_schema:
+          type: object
+
+    AssetTypeResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        display_name:
+          type: string
+        description:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    CreateAssetRequest:
+      type: object
+      required: [name, asset_type_id, level, external_ref, source]
+      properties:
+        name:
+          type: string
         asset_type_id:
           type: string
           format: uuid
-          description: Asset type UUID
-          example: "550e8400-e29b-41d4-a716-446655440000"
         project_id:
           type: string
           format: uuid
           nullable: true
-          description: For project-level assets
-          example: "660e8400-e29b-41d4-a716-446655440001"
         level:
-          $ref: '#/components/schemas/AssetLevel'
+          $ref: "#/components/schemas/AssetLevel"
+        external_ref:
+          type: string
+        source:
+          type: string
+        metadata:
+          type: object
+          nullable: true
         idempotency_key:
           type: string
           nullable: true
-          description: Prevent duplicate creation
-          example: "git:org1:proj1:abc123"
         dependencies:
           type: array
           items:
             type: string
             format: uuid
           nullable: true
-          description: Asset dependencies
+
+    UpdateAssetRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          nullable: true
+        assignees:
+          type: array
+          items:
+            type: string
+          nullable: true
+        metadata:
+          type: object
+          nullable: true
+
+    PaginatedAssets:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssetResponse"
+        total:
+          type: integer
+        page:
+          type: integer
+        per_page:
+          type: integer
+        total_pages:
+          type: integer
 
     AssetResponse:
       type: object
@@ -302,9 +414,25 @@ components:
           format: uuid
           nullable: true
         level:
-          $ref: '#/components/schemas/AssetLevel'
+          $ref: "#/components/schemas/AssetLevel"
         current_state:
-          $ref: '#/components/schemas/AssetState'
+          $ref: "#/components/schemas/AssetState"
+        external_ref:
+          type: string
+        source:
+          type: string
+        metadata:
+          type: object
+        assignees:
+          type: array
+          items:
+            type: string
+        publisher:
+          type: string
+          nullable: true
+        current_version:
+          type: string
+          nullable: true
         created_at:
           type: string
           format: date-time
@@ -314,76 +442,176 @@ components:
 
     AssetLevel:
       type: string
-      enum:
-        - project
-        - organization
-      description: |
-        project: Asset belongs to a specific project
-        organization: Asset is shared across all projects
+      enum: [project, organization]
 
     AssetState:
       type: string
-      enum:
-        - clean
-        - dirty
-        - archived
-      description: |
-        clean: Asset is up-to-date with upstream dependencies
-        dirty: An upstream dependency has a newer version
-        archived: Asset is read-only and no longer maintained
+      enum: [clean, dirty, archived]
 
     PublishRequest:
       type: object
-      required:
-        - version
+      required: [version]
       properties:
         version:
           type: string
-          description: Semantic version
-          example: "v2.0.0"
+        release_notes:
+          type: string
+          nullable: true
+        suggested_type:
+          type: string
+          nullable: true
+        dependencies:
+          type: array
+          nullable: true
+          items:
+            $ref: "#/components/schemas/PublishDependencyRequest"
+
+    PublishDependencyRequest:
+      type: object
+      required: [upstream_asset_id, version]
+      properties:
+        upstream_asset_id:
+          type: string
+          format: uuid
+        version:
+          type: string
 
     PublishResponse:
       type: object
       properties:
+        version:
+          type: string
         affected_assets:
           type: array
           items:
             type: string
             format: uuid
-          description: UUIDs of downstream assets marked as dirty
 
     ResolveRequest:
       type: object
-      required:
-        - resolved_version
       properties:
         resolved_version:
           type: string
-          description: Version being resolved to
-          example: "v2.0.0"
+          nullable: true
+        reviewed_by:
+          type: string
+          nullable: true
+        resolutions:
+          type: array
+          nullable: true
+          items:
+            $ref: "#/components/schemas/ManualCleanResolutionRequest"
+
+    ManualCleanResolutionRequest:
+      type: object
+      required: [upstream_asset_id, from_version, to_version, review_result]
+      properties:
+        upstream_asset_id:
+          type: string
+          format: uuid
+        from_version:
+          type: string
+        to_version:
+          type: string
+        review_result:
+          type: string
+        comment:
+          type: string
+          nullable: true
+
+    AssetVersionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        asset_id:
+          type: string
+          format: uuid
+        version_number:
+          type: string
+        metadata:
+          type: object
+        dependencies:
+          type: array
+          items:
+            $ref: "#/components/schemas/DependencySnapshotResponse"
+        release_notes:
+          type: string
+        suggested_type:
+          type: string
+          nullable: true
+        released_by:
+          type: string
+        released_at:
+          type: string
+          format: date-time
+
+    DependencySnapshotResponse:
+      type: object
+      properties:
+        upstream_asset_id:
+          type: string
+          format: uuid
+        upstream_version:
+          type: string
+
+    AssetDependencyResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        source_id:
+          type: string
+          format: uuid
+        target_id:
+          type: string
+          format: uuid
+        relationship:
+          type: string
+        declared_version:
+          type: string
+        effective_version:
+          type: string
+        effective_updated_by:
+          type: string
+        effective_reason:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    DependencyGraphResponse:
+      type: object
+      properties:
+        asset_id:
+          type: string
+          format: uuid
+        upstream:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssetDependencyResponse"
+        downstream:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssetDependencyResponse"
 
     HealthResponse:
       type: object
       properties:
         status:
           type: string
-          example: "healthy"
         version:
           type: string
-          example: "0.1.0"
 
     ErrorResponse:
       type: object
       properties:
         error:
           type: string
-          description: Error message
 
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: JWT
-      description: |
-        Bearer token in format: `{org_id}:{user_id}:{project1,project2,...}`
-        For MVP, this is a simple format. Production uses JWT.

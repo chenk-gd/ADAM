@@ -72,6 +72,7 @@ impl AssetType {
     }
 
     /// Recreate an asset type from persisted fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_fields(
         id: AssetTypeId,
         organization_id: OrganizationId,
@@ -112,10 +113,20 @@ impl AssetType {
         self.updated_at = chrono::Utc::now();
     }
 
+    /// Get the retention policy
+    pub fn retention_policy(&self) -> Option<&serde_json::Value> {
+        self.retention_policy.as_ref()
+    }
+
     /// Set the icon
     pub fn set_icon(&mut self, icon: impl Into<Option<String>>) {
         self.icon = icon.into();
         self.updated_at = chrono::Utc::now();
+    }
+
+    /// Get the icon
+    pub fn icon(&self) -> Option<&str> {
+        self.icon.as_deref()
     }
 
     /// Update the display name

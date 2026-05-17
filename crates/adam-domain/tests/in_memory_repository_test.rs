@@ -576,7 +576,10 @@ async fn dependency_repo_updates_effective_baseline() {
     assert_eq!(upstream[0].declared_version, "1.0.0");
     assert_eq!(upstream[0].effective_version, "1.1.0");
     assert_eq!(upstream[0].effective_updated_by, "bob");
-    assert_eq!(upstream[0].effective_reason, EffectiveUpdateReason::ManualClean);
+    assert_eq!(
+        upstream[0].effective_reason,
+        EffectiveUpdateReason::ManualClean
+    );
 }
 
 #[tokio::test]

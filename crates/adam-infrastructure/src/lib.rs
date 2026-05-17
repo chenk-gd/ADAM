@@ -5,5 +5,7 @@ pub mod repositories;
 // Re-export PostgreSQL repositories
 #[cfg(feature = "postgres")]
 pub use repositories::postgres::{
-    PostgresAssetRepository, PostgresDependencyRepository, PostgresDirtyQueueRepository,
+    PostgresAssetRepository, PostgresAssetTypeRepository, PostgresAssetVersionRepository,
+    PostgresDependencyRepository, PostgresDirtyQueueRepository,
+    PostgresDirtyResolutionLogRepository, PostgresVirtualInstanceRepository,
 };

@@ -86,11 +86,11 @@ pub struct VersionService<
 
 impl<
     A: AssetRepository,
-        D: DirtyQueueRepository,
-        V: AssetVersionRepository,
-        DEP: DependencyRepository,
-        L: DirtyResolutionLogRepository,
-    > VersionService<A, D, V, DEP, L>
+    D: DirtyQueueRepository,
+    V: AssetVersionRepository,
+    DEP: DependencyRepository,
+    L: DirtyResolutionLogRepository,
+> VersionService<A, D, V, DEP, L>
 {
     /// Create a new VersionService
     pub fn new(
@@ -233,10 +233,7 @@ impl<
     ///
     /// Resolves all dirty queue entries for the asset and transitions
     /// to Clean state if no unresolved entries remain.
-    pub async fn manual_clean(
-        &self,
-        cmd: ManualCleanCommand,
-    ) -> Result<(), VersionServiceError> {
+    pub async fn manual_clean(&self, cmd: ManualCleanCommand) -> Result<(), VersionServiceError> {
         SemVer::parse(&cmd.asset_version).map_err(|e| {
             VersionServiceError::InvalidVersion(format!("{}: {e}", cmd.asset_version))
         })?;
@@ -273,7 +270,9 @@ impl<
                 .ok_or_else(|| {
                     VersionServiceError::InvalidState(format!(
                         "No unresolved dirty entry for upstream {:?} from {} to {}",
-                        resolution.upstream_asset_id, resolution.from_version, resolution.to_version
+                        resolution.upstream_asset_id,
+                        resolution.from_version,
+                        resolution.to_version
                     ))
                 })?;
 
@@ -1009,12 +1008,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(downstream_asset.state(), AssetState::Clean);
-        assert!(service
-            .dirty_repo
-            .find_unresolved_by_asset(&downstream.id)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            service
+                .dirty_repo
+                .find_unresolved_by_asset(&downstream.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

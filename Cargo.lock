@@ -91,6 +91,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "tokio-test",
  "tower",

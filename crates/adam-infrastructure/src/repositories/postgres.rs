@@ -10,13 +10,152 @@ use adam_domain::asset::instance::AssetTypeId;
 use adam_domain::asset::state::AssetState;
 use adam_domain::dependency::boundary::AssetLevel;
 use adam_domain::{
-    AssetId, AssetInstance, AssetRepository, CreateAssetCommand, OrganizationId, ProjectId,
-    RepositoryError, UpdateAssetCommand,
+    AssetDependencyRecord, AssetId, AssetInstance, AssetRepository, AssetType, AssetTypeRepository,
+    CreateAssetCommand, DirtyResolutionLog, DirtyResolutionLogRepository, EffectiveUpdateReason,
+    OrganizationId, ProjectId, RepositoryError, UpdateAssetCommand, VersionStrategy,
+    VirtualInstance, VirtualInstanceId, VirtualInstanceRepository,
 };
 
 /// PostgreSQL implementation of AssetRepository
 pub struct PostgresAssetRepository {
     pool: PgPool,
+}
+
+/// PostgreSQL implementation of AssetTypeRepository
+pub struct PostgresAssetTypeRepository {
+    pool: PgPool,
+}
+
+impl PostgresAssetTypeRepository {
+    /// Create a new PostgresAssetTypeRepository with the given connection pool
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    fn row_to_asset_type(&self, row: &sqlx::postgres::PgRow) -> Result<AssetType, RepositoryError> {
+        let strategy: String = row.get("version_strategy");
+        let version_strategy = match strategy.as_str() {
+            "semver" => VersionStrategy::Semver,
+            "external_ref" => VersionStrategy::ExternalRef,
+            "composite" => VersionStrategy::Composite,
+            other => {
+                return Err(RepositoryError::DatabaseError(format!(
+                    "Unknown version_strategy: {other}"
+                )));
+            }
+        };
+
+        let retention_policy: Option<serde_json::Value> = row.try_get("retention_policy").ok();
+        let icon: Option<String> = row.try_get("icon").ok();
+
+        Ok(AssetType::new_with_fields(
+            AssetTypeId::from_uuid(row.get("id")),
+            OrganizationId::from_uuid(row.get("organization_id")),
+            row.get("name"),
+            row.get("display_name"),
+            row.try_get("description").unwrap_or_default(),
+            row.get("metadata_schema"),
+            version_strategy,
+            retention_policy,
+            icon,
+            row.get("created_at"),
+            row.get("updated_at"),
+        ))
+    }
+}
+
+#[async_trait]
+impl AssetTypeRepository for PostgresAssetTypeRepository {
+    async fn create(&self, asset_type: &AssetType) -> Result<AssetType, RepositoryError> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO asset_types (
+                id, organization_id, name, display_name, description,
+                metadata_schema, version_strategy, retention_policy, icon,
+                created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            RETURNING id, organization_id, name, display_name, description,
+                metadata_schema, version_strategy, retention_policy, icon,
+                created_at, updated_at
+            "#,
+        )
+        .bind(asset_type.id.0)
+        .bind(asset_type.organization_id.0)
+        .bind(&asset_type.name)
+        .bind(&asset_type.display_name)
+        .bind(&asset_type.description)
+        .bind(&asset_type.metadata_schema)
+        .bind(asset_type.version_strategy.to_string())
+        .bind(
+            asset_type
+                .retention_policy()
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        )
+        .bind(asset_type.icon())
+        .bind(asset_type.created_at)
+        .bind(chrono::Utc::now())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        self.row_to_asset_type(&row)
+    }
+
+    async fn find_by_id(&self, id: &AssetTypeId) -> Result<Option<AssetType>, RepositoryError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, organization_id, name, display_name, description,
+                metadata_schema, version_strategy, retention_policy, icon,
+                created_at, updated_at
+            FROM asset_types
+            WHERE id = $1
+            "#,
+        )
+        .bind(id.0)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        row.map(|row| self.row_to_asset_type(&row)).transpose()
+    }
+
+    async fn find_by_name(&self, name: &str) -> Result<Option<AssetType>, RepositoryError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, organization_id, name, display_name, description,
+                metadata_schema, version_strategy, retention_policy, icon,
+                created_at, updated_at
+            FROM asset_types
+            WHERE name = $1
+            LIMIT 1
+            "#,
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        row.map(|row| self.row_to_asset_type(&row)).transpose()
+    }
+
+    async fn list_all(&self) -> Result<Vec<AssetType>, RepositoryError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, organization_id, name, display_name, description,
+                metadata_schema, version_strategy, retention_policy, icon,
+                created_at, updated_at
+            FROM asset_types
+            ORDER BY name
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        rows.iter().map(|row| self.row_to_asset_type(row)).collect()
+    }
 }
 
 impl PostgresAssetRepository {
@@ -581,6 +720,35 @@ impl PostgresDependencyRepository {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
+
+    fn row_to_dependency_record(
+        &self,
+        row: &sqlx::postgres::PgRow,
+    ) -> Result<AssetDependencyRecord, RepositoryError> {
+        let reason: String = row.get("effective_reason");
+        let effective_reason = match reason.as_str() {
+            "publish" => EffectiveUpdateReason::Publish,
+            "manual_clean" => EffectiveUpdateReason::ManualClean,
+            other => {
+                return Err(RepositoryError::DatabaseError(format!(
+                    "Unknown effective_reason: {other}"
+                )));
+            }
+        };
+
+        Ok(AssetDependencyRecord {
+            id: row.get("id"),
+            source_id: AssetId::from_uuid(row.get("source_id")),
+            target_id: AssetId::from_uuid(row.get("target_id")),
+            relationship: row.get("relationship"),
+            declared_version: row.get("declared_version"),
+            effective_version: row.get("effective_version"),
+            effective_updated_by: row.get("effective_updated_by"),
+            effective_updated_at: row.get("effective_updated_at"),
+            effective_reason,
+            created_at: row.get("created_at"),
+        })
+    }
 }
 
 #[async_trait]
@@ -657,6 +825,216 @@ impl adam_domain::DependencyRepository for PostgresDependencyRepository {
         })?;
 
         Ok(())
+    }
+
+    async fn create_dependency_record(
+        &self,
+        record: &AssetDependencyRecord,
+    ) -> Result<(), RepositoryError> {
+        sqlx::query(
+            r#"
+            INSERT INTO asset_dependencies (
+                id, source_id, target_id, relationship, declared_version,
+                effective_version, effective_updated_by, effective_updated_at,
+                effective_reason, created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (source_id, target_id)
+            DO UPDATE SET
+                relationship = EXCLUDED.relationship,
+                declared_version = EXCLUDED.declared_version,
+                effective_version = EXCLUDED.effective_version,
+                effective_updated_by = EXCLUDED.effective_updated_by,
+                effective_updated_at = EXCLUDED.effective_updated_at,
+                effective_reason = EXCLUDED.effective_reason
+            "#,
+        )
+        .bind(record.id)
+        .bind(record.source_id.0)
+        .bind(record.target_id.0)
+        .bind(&record.relationship)
+        .bind(&record.declared_version)
+        .bind(&record.effective_version)
+        .bind(&record.effective_updated_by)
+        .bind(record.effective_updated_at)
+        .bind(record.effective_reason.as_str())
+        .bind(record.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn find_downstream_dependencies(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Vec<AssetDependencyRecord>, RepositoryError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id, source_id, target_id, relationship, declared_version,
+                effective_version, effective_updated_by, effective_updated_at,
+                effective_reason, created_at
+            FROM asset_dependencies
+            WHERE target_id = $1
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(asset_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        rows.iter()
+            .map(|row| self.row_to_dependency_record(row))
+            .collect()
+    }
+
+    async fn find_upstream_dependencies(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Vec<AssetDependencyRecord>, RepositoryError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id, source_id, target_id, relationship, declared_version,
+                effective_version, effective_updated_by, effective_updated_at,
+                effective_reason, created_at
+            FROM asset_dependencies
+            WHERE source_id = $1
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(asset_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        rows.iter()
+            .map(|row| self.row_to_dependency_record(row))
+            .collect()
+    }
+
+    async fn update_effective_version(
+        &self,
+        source_id: &AssetId,
+        target_id: &AssetId,
+        effective_version: String,
+        updated_by: String,
+        reason: EffectiveUpdateReason,
+    ) -> Result<(), RepositoryError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE asset_dependencies
+            SET
+                effective_version = $1,
+                effective_updated_by = $2,
+                effective_updated_at = NOW(),
+                effective_reason = $3
+            WHERE source_id = $4 AND target_id = $5
+            "#,
+        )
+        .bind(effective_version)
+        .bind(updated_by)
+        .bind(reason.as_str())
+        .bind(source_id.0)
+        .bind(target_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        if result.rows_affected() == 0 {
+            return Err(RepositoryError::NotFound(format!(
+                "dependency {} -> {}",
+                source_id.0, target_id.0
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+/// PostgreSQL implementation of DirtyResolutionLogRepository
+pub struct PostgresDirtyResolutionLogRepository {
+    pool: PgPool,
+}
+
+impl PostgresDirtyResolutionLogRepository {
+    /// Create a new PostgresDirtyResolutionLogRepository
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    fn row_to_log(&self, row: &sqlx::postgres::PgRow) -> DirtyResolutionLog {
+        DirtyResolutionLog {
+            id: row.get("id"),
+            asset_id: AssetId::from_uuid(row.get("asset_id")),
+            asset_version: row.get("asset_version"),
+            upstream_asset_id: AssetId::from_uuid(row.get("upstream_asset_id")),
+            from_version: row.get("from_version"),
+            to_version: row.get("to_version"),
+            action: row.get("action"),
+            review_result: row.get("review_result"),
+            comment: row.get("comment"),
+            reviewed_by: row.get("reviewed_by"),
+            reviewed_at: row.get("reviewed_at"),
+        }
+    }
+}
+
+#[async_trait]
+impl DirtyResolutionLogRepository for PostgresDirtyResolutionLogRepository {
+    async fn insert(&self, log: &DirtyResolutionLog) -> Result<(), RepositoryError> {
+        sqlx::query(
+            r#"
+            INSERT INTO dirty_resolution_logs (
+                id, asset_id, asset_version, upstream_asset_id,
+                from_version, to_version, action, review_result,
+                comment, reviewed_by, reviewed_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            "#,
+        )
+        .bind(log.id)
+        .bind(log.asset_id.0)
+        .bind(&log.asset_version)
+        .bind(log.upstream_asset_id.0)
+        .bind(&log.from_version)
+        .bind(&log.to_version)
+        .bind(&log.action)
+        .bind(&log.review_result)
+        .bind(&log.comment)
+        .bind(&log.reviewed_by)
+        .bind(log.reviewed_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn find_by_asset(
+        &self,
+        asset_id: &AssetId,
+    ) -> Result<Vec<DirtyResolutionLog>, RepositoryError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id, asset_id, asset_version, upstream_asset_id,
+                from_version, to_version, action, review_result,
+                comment, reviewed_by, reviewed_at
+            FROM dirty_resolution_logs
+            WHERE asset_id = $1
+            ORDER BY reviewed_at DESC
+            "#,
+        )
+        .bind(asset_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        Ok(rows.iter().map(|row| self.row_to_log(row)).collect())
     }
 }
 
@@ -799,6 +1177,136 @@ impl adam_domain::AssetVersionRepository for PostgresAssetVersionRepository {
             released_by: row.get("released_by"),
             released_at: row.get("released_at"),
         }))
+    }
+}
+
+/// PostgreSQL implementation of VirtualInstanceRepository
+pub struct PostgresVirtualInstanceRepository {
+    pool: PgPool,
+}
+
+impl PostgresVirtualInstanceRepository {
+    /// Create a new PostgresVirtualInstanceRepository
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    fn row_to_virtual_instance(&self, row: &sqlx::postgres::PgRow) -> VirtualInstance {
+        VirtualInstance {
+            id: VirtualInstanceId::from_uuid(row.get("id")),
+            target_type: AssetTypeId::from_uuid(row.get("target_type_id")),
+            target_type_name: row.get("target_type_name"),
+            anchors: row
+                .get::<Vec<Uuid>, _>("anchor_ids")
+                .into_iter()
+                .map(AssetId::from_uuid)
+                .collect(),
+            project_id: ProjectId::from_uuid(row.get("project_id")),
+            organization_id: OrganizationId::from_uuid(row.get("organization_id")),
+            created_by: row.get("created_by"),
+            created_at: row.get("created_at"),
+            expires_at: row.get("expires_at"),
+            context_summary: row.get("context_summary"),
+        }
+    }
+}
+
+#[async_trait]
+impl VirtualInstanceRepository for PostgresVirtualInstanceRepository {
+    async fn find_by_id(
+        &self,
+        id: &VirtualInstanceId,
+    ) -> Result<Option<VirtualInstance>, RepositoryError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id, target_type_id, target_type_name, anchor_ids,
+                project_id, organization_id, created_by, created_at,
+                expires_at, context_summary
+            FROM virtual_instances
+            WHERE id = $1
+            "#,
+        )
+        .bind(id.0)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        Ok(row.map(|row| self.row_to_virtual_instance(&row)))
+    }
+
+    async fn create(&self, instance: &VirtualInstance) -> Result<VirtualInstance, RepositoryError> {
+        sqlx::query(
+            r#"
+            INSERT INTO virtual_instances (
+                id, target_type_id, target_type_name, anchor_ids,
+                project_id, organization_id, created_by, created_at,
+                expires_at, context_summary
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+        )
+        .bind(instance.id.0)
+        .bind(instance.target_type.0)
+        .bind(&instance.target_type_name)
+        .bind(
+            instance
+                .anchors
+                .iter()
+                .map(|asset_id| asset_id.0)
+                .collect::<Vec<_>>(),
+        )
+        .bind(instance.project_id.0)
+        .bind(instance.organization_id.0)
+        .bind(&instance.created_by)
+        .bind(instance.created_at)
+        .bind(instance.expires_at)
+        .bind(&instance.context_summary)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        Ok(instance.clone())
+    }
+
+    async fn delete_expired(&self) -> Result<u64, RepositoryError> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM virtual_instances
+            WHERE expires_at < NOW()
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        Ok(result.rows_affected())
+    }
+
+    async fn find_by_project(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<Vec<VirtualInstance>, RepositoryError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id, target_type_id, target_type_name, anchor_ids,
+                project_id, organization_id, created_by, created_at,
+                expires_at, context_summary
+            FROM virtual_instances
+            WHERE project_id = $1
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(project_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|row| self.row_to_virtual_instance(row))
+            .collect())
     }
 }
 

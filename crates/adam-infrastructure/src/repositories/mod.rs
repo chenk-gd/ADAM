@@ -5,6 +5,7 @@ pub mod postgres;
 
 // Re-export PostgreSQL repository constructors
 pub use postgres::{
-    PostgresAssetRepository, PostgresAssetVersionRepository, PostgresDependencyRepository,
-    PostgresDirtyQueueRepository,
+    PostgresAssetRepository, PostgresAssetTypeRepository, PostgresAssetVersionRepository,
+    PostgresDependencyRepository, PostgresDirtyQueueRepository,
+    PostgresDirtyResolutionLogRepository, PostgresVirtualInstanceRepository,
 };
