@@ -12,7 +12,7 @@ use adam_domain::dependency::boundary::AssetLevel;
 use adam_domain::{
     AssetDependencyRecord, AssetId, AssetInstance, AssetRepository, AssetType, AssetTypeRepository,
     CreateAssetCommand, DirtyResolutionLog, DirtyResolutionLogRepository, EffectiveUpdateReason,
-    OrganizationId, ProjectId, RepositoryError, UpdateAssetCommand, VersionStrategy,
+    OrganizationId, ProjectId, RepositoryError, SemVer, UpdateAssetCommand, VersionStrategy,
     VirtualInstance, VirtualInstanceId, VirtualInstanceRepository,
 };
 
@@ -232,7 +232,8 @@ impl AssetRepository for PostgresAssetRepository {
                     cmd.metadata.clone(),
                     vec![],
                     None,
-                    None,
+                    SemVer::new(0, 0, 0), // Default version
+                    1,                     // Initial lock version
                     now,
                     now,
                     cmd.idempotency_key.clone(),
@@ -501,10 +502,20 @@ impl PostgresAssetRepository {
         // Optional fields - use ok().flatten() or unwrap_or_default
         let publisher: Option<String> =
             row.try_get::<Option<String>, _>("publisher").ok().flatten();
-        let current_version: Option<String> = row
+        let current_version_str: Option<String> = row
             .try_get::<Option<String>, _>("current_version")
             .ok()
             .flatten();
+        // Parse version or use default
+        let current_version = current_version_str
+            .and_then(|v| SemVer::parse(&v).ok())
+            .unwrap_or_else(|| SemVer::new(0, 0, 0));
+        // Lock version from DB or default to 1
+        let lock_version: i64 = row
+            .try_get::<Option<i64>, _>("lock_version")
+            .ok()
+            .flatten()
+            .unwrap_or(1);
 
         let created_at: chrono::DateTime<chrono::Utc> = row
             .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
@@ -561,6 +572,7 @@ impl PostgresAssetRepository {
             assignees,
             publisher,
             current_version,
+            lock_version,
             created_at,
             updated_at,
             idempotency_key,

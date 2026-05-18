@@ -2,7 +2,7 @@
 
 use adam_domain::{
     AssetId, AssetRepository, AssetState, DependencyRepository, DirtyQueueEntry,
-    DirtyQueueRepository, RepositoryError,
+    DirtyQueueRepository, RepositoryError, SemVer,
 };
 
 /// Error types for state propagation
@@ -94,8 +94,7 @@ impl StatePropagator {
                 upstream_old_version: effective_version.unwrap_or_else(|| {
                     downstream_asset
                         .current_version()
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "0.0.0".to_string())
+                        .to_string()
                 }),
                 impact_level: "medium".to_string(),
                 since: chrono::Utc::now(),
@@ -180,6 +179,7 @@ mod tests {
             "https://example.com/a",
             "manual",
             serde_json::json!({}),
+            SemVer::new(1, 0, 0),
         );
         let asset_b = AssetInstance::new_organization_level(
             "Asset B",
@@ -188,6 +188,7 @@ mod tests {
             "https://example.com/b",
             "manual",
             serde_json::json!({}),
+            SemVer::new(1, 0, 0),
         );
         let asset_c = AssetInstance::new_organization_level(
             "Asset C",
@@ -196,6 +197,7 @@ mod tests {
             "https://example.com/c",
             "manual",
             serde_json::json!({}),
+            SemVer::new(1, 0, 0),
         );
 
         let asset_repo = InMemoryAssetRepository::with_data(vec![
@@ -249,6 +251,7 @@ mod tests {
             "https://example.com/a",
             "manual",
             serde_json::json!({}),
+            SemVer::new(1, 0, 0),
         );
         let asset_b = AssetInstance::new_organization_level(
             "Asset B",
@@ -257,6 +260,7 @@ mod tests {
             "https://example.com/b",
             "manual",
             serde_json::json!({}),
+            SemVer::new(1, 0, 0),
         );
 
         // Create initial dirty entry (from v1.0.0)
@@ -309,6 +313,7 @@ mod tests {
             "https://example.com/a",
             "manual",
             serde_json::json!({}),
+            SemVer::new(1, 0, 0),
         );
         let asset_b = AssetInstance::new_organization_level(
             "Asset B",
@@ -317,6 +322,7 @@ mod tests {
             "https://example.com/b",
             "manual",
             serde_json::json!({}),
+            SemVer::new(1, 0, 0),
         );
 
         let dependency_repo = InMemoryDependencyRepository::new();
@@ -369,6 +375,7 @@ mod tests {
             "https://example.com/a",
             "manual",
             serde_json::json!({}),
+            SemVer::new(1, 0, 0),
         );
         // Create B as archived
         let mut asset_b = AssetInstance::new_organization_level(
@@ -378,6 +385,7 @@ mod tests {
             "https://example.com/b",
             "manual",
             serde_json::json!({}),
+            SemVer::new(1, 0, 0),
         );
 
         let asset_c = AssetInstance::new_organization_level(
@@ -387,6 +395,7 @@ mod tests {
             "https://example.com/c",
             "manual",
             serde_json::json!({}),
+            SemVer::new(1, 0, 0),
         );
 
         // Archive B before putting in repository
@@ -443,6 +452,7 @@ mod tests {
             "https://example.com/a",
             "manual",
             serde_json::json!({}),
+            SemVer::new(1, 0, 0),
         );
         asset_a.archive().unwrap();
 
@@ -453,6 +463,7 @@ mod tests {
             "https://example.com/b",
             "manual",
             serde_json::json!({}),
+            SemVer::new(1, 0, 0),
         );
 
         let asset_repo = InMemoryAssetRepository::with_data(vec![asset_a.clone(), asset_b.clone()]);
@@ -494,6 +505,7 @@ mod tests {
             "https://example.com/a",
             "manual",
             serde_json::json!({}),
+            SemVer::new(1, 0, 0),
         );
         // Don't create asset_b - it will be missing
         let asset_b = AssetInstance::new_organization_level(
@@ -503,6 +515,7 @@ mod tests {
             "https://example.com/b",
             "manual",
             serde_json::json!({}),
+            SemVer::new(1, 0, 0),
         );
 
         let asset_repo = InMemoryAssetRepository::with_data(vec![asset_a.clone()]); // B is missing

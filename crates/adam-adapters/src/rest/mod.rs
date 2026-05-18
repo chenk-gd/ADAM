@@ -334,7 +334,7 @@ impl From<AssetInstance> for AssetResponse {
         let state = asset.state();
         let updated_at = asset.updated_at();
         let publisher = asset.publisher().map(|s| s.to_string());
-        let current_version = asset.current_version().map(|s| s.to_string());
+        let current_version = asset.current_version().to_string();
 
         AssetResponse {
             id: asset.id.0,
@@ -354,7 +354,7 @@ impl From<AssetInstance> for AssetResponse {
             metadata,
             assignees,
             publisher,
-            current_version,
+            current_version: Some(current_version),
             created_at,
             updated_at,
         }
@@ -898,7 +898,7 @@ pub async fn resolve_dirty(
 
     let asset_version = req
         .resolved_version
-        .or_else(|| asset.current_version().cloned())
+        .or_else(|| Some(asset.current_version().to_string()))
         .unwrap_or_else(|| "0.0.0".to_string());
     let resolutions = match req.resolutions {
         Some(resolutions) => resolutions
@@ -1857,7 +1857,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(updated.current_version().map(String::as_str), Some("1.2.0"));
+        assert_eq!(updated.current_version().to_string(), "1.2.0");
         assert_eq!(updated.publisher().map(String::as_str), Some("publisher"));
     }
 

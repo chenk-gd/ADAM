@@ -467,7 +467,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(updated.current_version().map(String::as_str), Some("1.0.0"));
+        assert_eq!(updated.current_version().to_string(), "1.0.0");
         assert_eq!(updated.publisher().map(String::as_str), Some("test_user"));
         assert_eq!(updated.state(), AssetState::Clean);
     }

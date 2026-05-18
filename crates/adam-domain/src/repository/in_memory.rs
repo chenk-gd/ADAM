@@ -10,7 +10,7 @@ use crate::repository::{
     RepositoryError, UpdateAssetCommand,
 };
 use crate::{
-    DirtyQueueEntry, DirtyQueueRepository, OrganizationId, ProjectId, VirtualInstance,
+    DirtyQueueEntry, DirtyQueueRepository, OrganizationId, ProjectId, SemVer, VirtualInstance,
     VirtualInstanceId, VirtualInstanceRepository,
 };
 use async_trait::async_trait;
@@ -77,7 +77,8 @@ impl AssetRepository for InMemoryAssetRepository {
             metadata: cmd.metadata.clone(),
             assignees: vec![],
             publisher: None,
-            current_version: None,
+            current_version: SemVer::new(0, 0, 0), // Default version
+            lock_version: 1,                       // Initialize lock
             created_at: Utc::now(),
             updated_at: Utc::now(),
             idempotency_key: cmd.idempotency_key.clone(),
@@ -136,9 +137,13 @@ impl AssetRepository for InMemoryAssetRepository {
                     asset.current_state, state
                 )));
             }
-            asset.current_version = Some(current_version);
+            // Parse version string to SemVer
+            let semver = SemVer::parse(&current_version)
+                .map_err(|e| RepositoryError::ValidationError(format!("Invalid version: {e}")))?;
+            asset.current_version = semver;
             asset.publisher = Some(publisher);
             asset.current_state = state;
+            asset.lock_version += 1; // Increment lock on update
             asset.updated_at = Utc::now();
             Ok(())
         } else {

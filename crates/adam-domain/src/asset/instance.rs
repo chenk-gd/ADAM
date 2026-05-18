@@ -2,6 +2,7 @@
 
 use crate::asset::state::{AssetState, StateError};
 use crate::dependency::boundary::AssetLevel;
+use crate::version::SemVer;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -108,7 +109,8 @@ pub struct AssetInstance {
     pub metadata: serde_json::Value,            // 按类型 schema 的元数据
     pub assignees: Vec<String>,                 // 责任人列表
     pub(crate) publisher: Option<String>,       // 最新版本发布人
-    pub(crate) current_version: Option<String>, // 当前发布的版本号
+    pub(crate) current_version: SemVer,         // 当前发布的版本号 (CHANGED: from Option<String>)
+    pub(crate) lock_version: i64,               // NEW: for optimistic locking
 
     pub created_at: DateTime<Utc>,
     pub(crate) updated_at: DateTime<Utc>,
@@ -125,6 +127,7 @@ impl AssetInstance {
         external_ref: impl Into<String>,
         source: impl Into<String>,
         metadata: serde_json::Value,
+        initial_version: SemVer,  // NEW: required SemVer
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -140,7 +143,8 @@ impl AssetInstance {
             metadata,
             assignees: vec![],
             publisher: None,
-            current_version: None,
+            current_version: initial_version,  // CHANGED
+            lock_version: 1,                  // NEW: initialize to 1
             created_at: now,
             updated_at: now,
             idempotency_key: None,
@@ -155,6 +159,7 @@ impl AssetInstance {
         external_ref: impl Into<String>,
         source: impl Into<String>,
         metadata: serde_json::Value,
+        initial_version: SemVer,  // NEW: required SemVer
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -170,7 +175,8 @@ impl AssetInstance {
             metadata,
             assignees: vec![],
             publisher: None,
-            current_version: None,
+            current_version: initial_version,  // CHANGED
+            lock_version: 1,                  // NEW: initialize to 1
             created_at: now,
             updated_at: now,
             idempotency_key: None,
@@ -193,8 +199,13 @@ impl AssetInstance {
     }
 
     /// Get the current version
-    pub fn current_version(&self) -> Option<&String> {
-        self.current_version.as_ref()
+    pub fn current_version(&self) -> &SemVer {
+        &self.current_version
+    }
+
+    /// Get the lock version (for optimistic locking)
+    pub fn lock_version(&self) -> i64 {
+        self.lock_version
     }
 
     /// Get the updated_at timestamp
@@ -239,9 +250,14 @@ impl AssetInstance {
     }
 
     /// Set the current version
-    pub fn set_current_version(&mut self, version: impl Into<String>) {
-        self.current_version = Some(version.into());
+    pub fn set_current_version(&mut self, version: SemVer) {
+        self.current_version = version;
         self.updated_at = Utc::now();
+    }
+
+    /// Increment lock version (for optimistic locking)
+    pub fn increment_lock_version(&mut self) {
+        self.lock_version += 1;
     }
 
     /// Set the idempotency key
@@ -265,7 +281,8 @@ impl AssetInstance {
         metadata: serde_json::Value,
         assignees: Vec<String>,
         publisher: Option<String>,
-        current_version: Option<String>,
+        current_version: SemVer,  // CHANGED
+        lock_version: i64,        // NEW
         created_at: DateTime<Utc>,
         updated_at: DateTime<Utc>,
         idempotency_key: Option<String>,
@@ -284,6 +301,7 @@ impl AssetInstance {
             assignees,
             publisher,
             current_version,
+            lock_version,
             created_at,
             updated_at,
             idempotency_key,
@@ -342,6 +360,7 @@ mod tests {
             "https://example.com/asset/1",
             "manual",
             serde_json::json!({"title": "Test"}),
+            SemVer::new(1, 0, 0),  // NEW: initial version
         );
 
         assert_eq!(asset.name, "Test Asset");
@@ -352,6 +371,8 @@ mod tests {
         assert_eq!(asset.external_ref, "https://example.com/asset/1");
         assert_eq!(asset.source, "manual");
         assert!(asset.assignees.is_empty());
+        assert_eq!(asset.current_version, SemVer::new(1, 0, 0));
+        assert_eq!(asset.lock_version, 1);
     }
 
     #[test]
@@ -366,6 +387,7 @@ mod tests {
             "https://wiki.example.com/standards",
             "wiki",
             serde_json::json!({"category": "standard"}),
+            SemVer::new(0, 1, 0),  // NEW: initial version
         );
 
         assert_eq!(asset.name, "Org Standard");
@@ -373,6 +395,8 @@ mod tests {
         assert_eq!(asset.project_id, None);
         assert_eq!(asset.state(), AssetState::Clean);
         assert_eq!(asset.source, "wiki");
+        assert_eq!(asset.current_version, SemVer::new(0, 1, 0));
+        assert_eq!(asset.lock_version, 1);
     }
 
     #[test]
@@ -386,10 +410,48 @@ mod tests {
             "https://example.com/asset",
             "manual",
             serde_json::json!({}),
+            SemVer::new(1, 0, 0),  // NEW: initial version
         );
 
         assert!(!asset.is_archived());
         asset.archive().unwrap();
         assert!(asset.is_archived());
+    }
+
+    #[test]
+    fn test_set_current_version() {
+        let org_id = OrganizationId::new();
+        let type_id = AssetTypeId::new();
+        let mut asset = AssetInstance::new_organization_level(
+            "Test",
+            type_id,
+            org_id,
+            "https://example.com/asset",
+            "manual",
+            serde_json::json!({}),
+            SemVer::new(1, 0, 0),
+        );
+
+        asset.set_current_version(SemVer::new(2, 0, 0));
+        assert_eq!(asset.current_version(), &SemVer::new(2, 0, 0));
+    }
+
+    #[test]
+    fn test_lock_version_increment() {
+        let org_id = OrganizationId::new();
+        let type_id = AssetTypeId::new();
+        let mut asset = AssetInstance::new_organization_level(
+            "Test",
+            type_id,
+            org_id,
+            "https://example.com/asset",
+            "manual",
+            serde_json::json!({}),
+            SemVer::new(1, 0, 0),
+        );
+
+        assert_eq!(asset.lock_version(), 1);
+        asset.increment_lock_version();
+        assert_eq!(asset.lock_version(), 2);
     }
 }

@@ -535,7 +535,7 @@ async fn memory_repo_updates_publication_fields() {
     .unwrap();
 
     let updated = repo.find_by_id(&asset.id).await.unwrap().unwrap();
-    assert_eq!(updated.current_version(), Some(&"1.2.3".to_string()));
+    assert_eq!(updated.current_version().to_string(), "1.2.3");
     assert_eq!(updated.publisher(), Some(&"alice".to_string()));
     assert_eq!(updated.state(), AssetState::Clean);
 }

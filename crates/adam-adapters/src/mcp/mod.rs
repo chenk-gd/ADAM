@@ -905,8 +905,7 @@ impl AdamMcpServer {
                 upstream_asset_id,
                 version: upstream
                     .current_version()
-                    .cloned()
-                    .unwrap_or_else(|| "0.0.0".to_string()),
+                    .to_string(),
             });
         }
 
@@ -991,10 +990,8 @@ impl AdamMcpServer {
         }
 
         // Get current version from asset
-        let current_version = asset
-            .current_version()
-            .map(|v| v.as_str())
-            .unwrap_or("0.0.0");
+        let current_version_str = asset.current_version().to_string();
+        let current_version: &str = &current_version_str;
 
         // Map change_type string to ChangeType enum
         let change_type = match request.change_type.as_deref() {
@@ -1028,7 +1025,7 @@ impl AdamMcpServer {
         let response = SuggestVersionResponse {
             asset_id: asset.id.0.to_string(),
             suggested_version,
-            current_version: asset.current_version().map(|v| v.to_string()),
+            current_version: Some(asset.current_version().to_string()),
             reason: format!(
                 "Suggested {:?} version bump from {}",
                 request.change_type, current_version
@@ -1177,7 +1174,7 @@ impl AdamMcpServer {
 
         let asset_version = request
             .resolved_version
-            .or_else(|| asset.current_version().cloned())
+            .or_else(|| Some(asset.current_version().to_string()))
             .unwrap_or_else(|| "0.0.0".to_string());
         let resolutions = match request.resolutions {
             Some(resolutions) => {
@@ -1969,7 +1966,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(updated.current_version().map(String::as_str), Some("1.0.0"));
+        assert_eq!(updated.current_version().to_string(), "1.0.0");
     }
 
     #[tokio::test]

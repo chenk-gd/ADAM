@@ -26,6 +26,9 @@ pub enum RepositoryError {
     /// Invalid state transition
     #[error("Invalid state transition: {0}")]
     InvalidStateTransition(String),
+    /// Validation error
+    #[error("Validation error: {0}")]
+    ValidationError(String),
 }
 
 /// Command for creating a new asset
