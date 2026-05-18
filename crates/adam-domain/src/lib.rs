@@ -4,6 +4,7 @@ pub mod asset;
 pub mod auth;
 pub mod dependency;
 pub mod repository;
+pub mod version;
 pub mod virtual_instance;
 
 pub use asset::asset_type::{AssetType, VersionStrategy};
@@ -26,4 +27,5 @@ pub use repository::{
     DependencyRepository, DirtyQueueEntry, DirtyQueueRepository, DirtyResolutionLog,
     DirtyResolutionLogRepository, EffectiveUpdateReason, RepositoryError, UpdateAssetCommand,
 };
+pub use version::SemVer;
 pub use virtual_instance::{VirtualInstance, VirtualInstanceId, VirtualInstanceRepository};
