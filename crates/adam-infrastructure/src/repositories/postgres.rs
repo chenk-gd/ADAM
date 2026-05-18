@@ -748,16 +748,36 @@ impl PostgresDependencyRepository {
             }
         };
 
+        let declared_version_str: String = row.get("declared_version");
+        let declared_constraint = VersionConstraint::parse(&declared_version_str)
+            .map_err(|e| RepositoryError::ValidationError(format!("Invalid constraint: {e}")))?;
+        let effective_version_str: String = row.get("effective_version");
+        let effective_version = SemVer::parse(&effective_version_str)
+            .map_err(|e| RepositoryError::ValidationError(format!("Invalid version: {e}")))?;
+        let upgrade_policy_str: String = row.get("upgrade_policy");
+        let upgrade_policy = match upgrade_policy_str.as_str() {
+            "auto_patch" => UpgradePolicy::AutoPatch,
+            "auto_minor" => UpgradePolicy::AutoMinor,
+            "notify" => UpgradePolicy::Notify,
+            "manual" => UpgradePolicy::Manual,
+            "pin" => UpgradePolicy::Pin,
+            _ => UpgradePolicy::default(),
+        };
+        let lock_version: i64 = row.get::<i64, _>("lock_version").unwrap_or(1);
+
         Ok(AssetDependencyRecord {
             id: row.get("id"),
             source_id: AssetId::from_uuid(row.get("source_id")),
             target_id: AssetId::from_uuid(row.get("target_id")),
             relationship: row.get("relationship"),
-            declared_version: row.get("declared_version"),
-            effective_version: row.get("effective_version"),
+            declared_constraint,
+            constraint_str: declared_version_str,
+            effective_version,
             effective_updated_by: row.get("effective_updated_by"),
             effective_updated_at: row.get("effective_updated_at"),
             effective_reason,
+            upgrade_policy,
+            lock_version,
             created_at: row.get("created_at"),
         })
     }

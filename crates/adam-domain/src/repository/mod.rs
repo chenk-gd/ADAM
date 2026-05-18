@@ -169,18 +169,55 @@ impl EffectiveUpdateReason {
     }
 }
 
-/// Full dependency record with declared and effective versions
+/// Upgrade policy for dependency updates
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UpgradePolicy {
+    /// Automatically update patch versions
+    AutoPatch,
+    /// Automatically update minor versions
+    AutoMinor,
+    /// Notify but don't auto-update
+    Notify,
+    /// Manual review required
+    Manual,
+    /// Pin to specific version
+    Pin,
+}
+
+impl Default for UpgradePolicy {
+    fn default() -> Self {
+        UpgradePolicy::Notify
+    }
+}
+
+impl UpgradePolicy {
+    /// Stable storage representation
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UpgradePolicy::AutoPatch => "auto_patch",
+            UpgradePolicy::AutoMinor => "auto_minor",
+            UpgradePolicy::Notify => "notify",
+            UpgradePolicy::Manual => "manual",
+            UpgradePolicy::Pin => "pin",
+        }
+    }
+}
+
+/// Full dependency record with declared constraint and effective version
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetDependencyRecord {
     pub id: uuid::Uuid,
     pub source_id: AssetId,
     pub target_id: AssetId,
     pub relationship: String,
-    pub declared_version: String,
-    pub effective_version: String,
+    pub declared_constraint: crate::version::VersionConstraint,  // CHANGED: from String
+    pub constraint_str: String,                                   // NEW: for DB storage
+    pub effective_version: crate::version::SemVer,              // CHANGED: from String
     pub effective_updated_by: String,
     pub effective_updated_at: chrono::DateTime<chrono::Utc>,
     pub effective_reason: EffectiveUpdateReason,
+    pub upgrade_policy: UpgradePolicy,                          // NEW
+    pub lock_version: i64,                                      // NEW: for optimistic locking
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 

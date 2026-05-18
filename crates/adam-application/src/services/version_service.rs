@@ -169,7 +169,7 @@ impl<
                     source_id: cmd.asset_id,
                     target_id: dependency.upstream_asset_id,
                     relationship: "depends_on".to_string(),
-                    declared_version: dependency.version.clone(),
+                    constraint_str: dependency.version.clone(),
                     effective_version: dependency.version.clone(),
                     effective_updated_by: cmd.publisher.clone(),
                     effective_updated_at: now,
@@ -537,8 +537,8 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source_id, downstream.id);
         assert_eq!(records[0].target_id, upstream.id);
-        assert_eq!(records[0].declared_version, "1.0.0");
-        assert_eq!(records[0].effective_version, "1.0.0");
+        assert_eq!(records[0].constraint_str, "1.0.0");
+        assert_eq!(records[0].effective_version.to_string(), "1.0.0");
         assert_eq!(records[0].effective_updated_by, "publisher");
         assert_eq!(records[0].effective_reason, EffectiveUpdateReason::Publish);
     }
@@ -578,7 +578,7 @@ mod tests {
                 source_id: downstream.id,
                 target_id: upstream.id,
                 relationship: "depends_on".to_string(),
-                declared_version: "1.0.0".to_string(),
+                constraint_str: "1.0.0".to_string(),
                 effective_version: "1.0.0".to_string(),
                 effective_updated_by: "publisher".to_string(),
                 effective_updated_at: chrono::Utc::now(),
@@ -719,7 +719,7 @@ mod tests {
                 source_id: asset.id,
                 target_id: upstream_id,
                 relationship: "depends_on".to_string(),
-                declared_version: "0.0.0".to_string(),
+                constraint_str: "0.0.0".to_string(),
                 effective_version: "0.0.0".to_string(),
                 effective_updated_by: "publisher".to_string(),
                 effective_updated_at: chrono::Utc::now(),
@@ -782,7 +782,7 @@ mod tests {
             .find_upstream_dependencies(&asset.id)
             .await
             .unwrap();
-        assert_eq!(records[0].effective_version, "1.0.0");
+        assert_eq!(records[0].effective_version.to_string(), "1.0.0");
         assert_eq!(records[0].effective_updated_by, "reviewer");
         assert_eq!(
             records[0].effective_reason,
@@ -835,7 +835,7 @@ mod tests {
                     source_id: asset.id,
                     target_id: upstream_id,
                     relationship: "depends_on".to_string(),
-                    declared_version: "1.0.0".to_string(),
+                    constraint_str: "1.0.0".to_string(),
                     effective_version: "1.0.0".to_string(),
                     effective_updated_by: "publisher".to_string(),
                     effective_updated_at: chrono::Utc::now(),
@@ -952,7 +952,7 @@ mod tests {
                     source_id,
                     target_id,
                     relationship: "depends_on".to_string(),
-                    declared_version: "1.0.0".to_string(),
+                    constraint_str: "1.0.0".to_string(),
                     effective_version: "1.0.0".to_string(),
                     effective_updated_by: "publisher".to_string(),
                     effective_updated_at: chrono::Utc::now(),

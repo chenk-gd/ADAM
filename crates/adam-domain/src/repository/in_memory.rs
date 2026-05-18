@@ -7,12 +7,13 @@ use crate::asset::version::{AssetVersion, AssetVersionId, AssetVersionRepository
 use crate::repository::{
     AssetDependencyRecord, AssetRepository, AssetTypeRepository, CreateAssetCommand,
     DependencyRepository, DirtyResolutionLog, DirtyResolutionLogRepository, EffectiveUpdateReason,
-    RepositoryError, UpdateAssetCommand,
+    RepositoryError, UpdateAssetCommand, UpgradePolicy,
 };
 use crate::{
     DirtyQueueEntry, DirtyQueueRepository, OrganizationId, ProjectId, SemVer, VirtualInstance,
     VirtualInstanceId, VirtualInstanceRepository,
 };
+use crate::version::VersionConstraint;
 use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -518,11 +519,14 @@ impl DependencyRepository for InMemoryDependencyRepository {
             source_id: *source_id,
             target_id: *target_id,
             relationship: "depends_on".to_string(),
-            declared_version: "0.0.0".to_string(),
-            effective_version: "0.0.0".to_string(),
+            declared_constraint: VersionConstraint::parse("^0.0.0").unwrap(),
+            constraint_str: "^0.0.0".to_string(),
+            effective_version: SemVer::new(0, 0, 0),
             effective_updated_by: "system".to_string(),
             effective_updated_at: now,
             effective_reason: EffectiveUpdateReason::Publish,
+            upgrade_policy: UpgradePolicy::default(),
+            lock_version: 1,
             created_at: now,
         };
         self.create_dependency_record(&record).await
@@ -599,10 +603,12 @@ impl DependencyRepository for InMemoryDependencyRepository {
         let record = records
             .get_mut(&(*source_id, *target_id))
             .ok_or_else(|| RepositoryError::NotFound(format!("{source_id:?}->{target_id:?}")))?;
-        record.effective_version = effective_version;
+        record.effective_version = SemVer::parse(&effective_version)
+            .map_err(|e| RepositoryError::ValidationError(format!("Invalid version: {e}")))?;
         record.effective_updated_by = updated_by;
         record.effective_updated_at = Utc::now();
         record.effective_reason = reason;
+        record.lock_version += 1;
         Ok(())
     }
 }

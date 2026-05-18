@@ -58,7 +58,7 @@ impl StatePropagator {
             match dependency_repo.find_downstream_dependencies(asset_id).await {
                 Ok(records) => records
                     .into_iter()
-                    .map(|record| (record.source_id, Some(record.effective_version)))
+                    .map(|record| (record.source_id, Some(record.effective_version.to_string())))
                     .collect(),
                 Err(_) => dependency_repo
                     .find_downstream(asset_id)
@@ -332,7 +332,7 @@ mod tests {
                 source_id: asset_b.id,
                 target_id: asset_a.id,
                 relationship: "depends_on".to_string(),
-                declared_version: "1.0.0".to_string(),
+                declared_constraint: "1.0.0".to_string(),
                 effective_version: "1.0.3".to_string(),
                 effective_updated_by: "reviewer".to_string(),
                 effective_updated_at: chrono::Utc::now(),

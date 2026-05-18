@@ -26,6 +26,7 @@ pub use repository::{
     AssetDependencyRecord, AssetRepository, AssetTypeRepository, CreateAssetCommand,
     DependencyRepository, DirtyQueueEntry, DirtyQueueRepository, DirtyResolutionLog,
     DirtyResolutionLogRepository, EffectiveUpdateReason, RepositoryError, UpdateAssetCommand,
+    UpgradePolicy,
 };
 pub use version::SemVer;
 pub use virtual_instance::{VirtualInstance, VirtualInstanceId, VirtualInstanceRepository};

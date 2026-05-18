@@ -6,6 +6,8 @@ use adam_domain::repository::{
     DirtyQueueEntry, DirtyQueueRepository, DirtyResolutionLog, DirtyResolutionLogRepository,
     EffectiveUpdateReason, RepositoryError,
 };
+use adam_domain::version::{SemVer, VersionConstraint};
+use adam_domain::repository::UpgradePolicy;
 use adam_domain::{
     AssetId, AssetTypeId, InMemoryAssetRepository, InMemoryDependencyRepository,
     InMemoryDirtyQueueRepository, InMemoryDirtyResolutionLogRepository, OrganizationId, ProjectId,
@@ -551,11 +553,14 @@ async fn dependency_repo_updates_effective_baseline() {
         source_id: source,
         target_id: target,
         relationship: "depends_on".to_string(),
-        declared_version: "1.0.0".to_string(),
-        effective_version: "1.0.0".to_string(),
+        declared_constraint: VersionConstraint::parse("^1.0.0").unwrap(),
+        constraint_str: "^1.0.0".to_string(),
+        effective_version: SemVer::parse("1.0.0").unwrap(),
         effective_updated_by: "alice".to_string(),
         effective_updated_at: Utc::now(),
         effective_reason: EffectiveUpdateReason::Publish,
+        upgrade_policy: UpgradePolicy::default(),
+        lock_version: 1,
         created_at: Utc::now(),
     })
     .await
@@ -621,11 +626,14 @@ async fn dependency_repo_downstream_records_include_effective_version() {
         source_id: downstream,
         target_id: upstream,
         relationship: "depends_on".to_string(),
-        declared_version: "1.0.0".to_string(),
-        effective_version: "1.0.1".to_string(),
+        declared_constraint: VersionConstraint::parse("^1.0.0").unwrap(),
+        constraint_str: "^1.0.0".to_string(),
+        effective_version: SemVer::parse("1.0.1").unwrap(),
         effective_updated_by: "alice".to_string(),
         effective_updated_at: Utc::now(),
         effective_reason: EffectiveUpdateReason::ManualClean,
+        upgrade_policy: UpgradePolicy::default(),
+        lock_version: 1,
         created_at: Utc::now(),
     })
     .await
