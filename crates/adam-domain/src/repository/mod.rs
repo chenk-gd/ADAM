@@ -29,6 +29,9 @@ pub enum RepositoryError {
     /// Validation error
     #[error("Validation error: {0}")]
     ValidationError(String),
+    /// Concurrent modification - lock version mismatch
+    #[error("Concurrent modification: expected lock version {expected}, actual {actual}")]
+    ConcurrentModification { expected: i64, actual: i64 },
 }
 
 /// Command for creating a new asset
@@ -81,6 +84,31 @@ pub trait AssetRepository: Send + Sync {
         state: AssetState,
     ) -> Result<(), RepositoryError>;
 
+    /// Update fields changed by a successful publish operation with CAS (Compare-And-Swap) optimistic locking
+    ///
+    /// # CAS Semantics
+    /// This method performs an atomic update only if the asset's lock_version matches
+    /// the expected value. This prevents lost updates in concurrent scenarios.
+    ///
+    /// # Arguments
+    /// * `id` - Asset ID to update
+    /// * `current_version` - New current version string
+    /// * `publisher` - Who published the version
+    /// * `state` - New asset state
+    /// * `expected_lock_version` - Expected lock_version for CAS check
+    ///
+    /// # Returns
+    /// * `Ok(new_lock_version)` - Update successful, returns the new lock_version
+    /// * `Err(RepositoryError::ConcurrentModification)` - CAS check failed, asset was modified
+    async fn update_publication_cas(
+        &self,
+        id: &AssetId,
+        current_version: String,
+        publisher: String,
+        state: AssetState,
+        expected_lock_version: i64,
+    ) -> Result<i64, RepositoryError>;
+
     /// Find assets by project ID
     async fn find_by_project_id(
         &self,
@@ -128,6 +156,19 @@ impl<T: AssetRepository + ?Sized> AssetRepository for Arc<T> {
     ) -> Result<(), RepositoryError> {
         self.as_ref()
             .update_publication(id, current_version, publisher, state)
+            .await
+    }
+
+    async fn update_publication_cas(
+        &self,
+        id: &AssetId,
+        current_version: String,
+        publisher: String,
+        state: AssetState,
+        expected_lock_version: i64,
+    ) -> Result<i64, RepositoryError> {
+        self.as_ref()
+            .update_publication_cas(id, current_version, publisher, state, expected_lock_version)
             .await
     }
 
@@ -450,4 +491,119 @@ pub trait AssetTypeRepository: Send + Sync {
 
     /// List all asset types
     async fn list_all(&self) -> Result<Vec<AssetType>, RepositoryError>;
+}
+
+/// Transaction trait for atomic operations
+///
+/// Implementations should provide database-level transaction support
+/// to ensure ACID properties across multiple repository operations.
+#[async_trait]
+pub trait Transaction: Send + Sync {
+    /// Commit the transaction
+    async fn commit(self) -> Result<(), RepositoryError>;
+
+    /// Rollback the transaction
+    async fn rollback(self) -> Result<(), RepositoryError>;
+}
+
+/// Unit of work for transactional repository operations
+///
+/// This trait allows repositories to participate in transactions
+/// by providing methods that execute within a transaction context.
+#[async_trait]
+pub trait UnitOfWork: Send + Sync {
+    /// Execute a closure within a transaction
+    ///
+    /// The closure receives a transactional context that can be used
+    /// to perform repository operations atomically.
+    ///
+    /// # Type Parameters
+    /// * `F` - The closure type that performs transactional operations
+    /// * `T` - The return type of the closure
+    /// * `E` - The error type (must be convertible from RepositoryError)
+    ///
+    /// # Arguments
+    /// * `operation` - Closure that receives transaction context and returns Result
+    ///
+    /// # Returns
+    /// * `Ok(T)` - Transaction committed successfully, returns closure result
+    /// * `Err(E)` - Transaction rolled back, returns closure error
+    async fn transaction<F, T, E>(&self, operation: F) -> Result<T, E>
+    where
+        F: for<'a> FnOnce(&'a mut TransactionContext)
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, E>> + Send + 'a>>
+            + Send
+            + 'async_trait,
+        E: From<RepositoryError> + Send,
+        T: Send;
+}
+
+/// Transaction context for repository operations within a transaction
+///
+/// This struct holds the transaction handle and provides access to
+/// transactional versions of repositories.
+pub struct TransactionContext {
+    /// Transaction-specific asset repository
+    pub asset_repo: Box<dyn AssetRepository>,
+    /// Transaction-specific dependency repository
+    pub dependency_repo: Box<dyn DependencyRepository>,
+    /// Transaction-specific dirty queue repository
+    pub dirty_queue_repo: Box<dyn DirtyQueueRepository>,
+}
+
+/// Builder for transaction context
+///
+/// Allows flexible construction of transaction contexts with
+/// different repository combinations.
+pub struct TransactionContextBuilder {
+    asset_repo: Option<Box<dyn AssetRepository>>,
+    dependency_repo: Option<Box<dyn DependencyRepository>>,
+    dirty_queue_repo: Option<Box<dyn DirtyQueueRepository>>,
+}
+
+impl TransactionContextBuilder {
+    /// Create a new builder
+    pub fn new() -> Self {
+        Self {
+            asset_repo: None,
+            dependency_repo: None,
+            dirty_queue_repo: None,
+        }
+    }
+
+    /// Set the asset repository
+    pub fn with_asset_repo(mut self, repo: Box<dyn AssetRepository>) -> Self {
+        self.asset_repo = Some(repo);
+        self
+    }
+
+    /// Set the dependency repository
+    pub fn with_dependency_repo(mut self, repo: Box<dyn DependencyRepository>) -> Self {
+        self.dependency_repo = Some(repo);
+        self
+    }
+
+    /// Set the dirty queue repository
+    pub fn with_dirty_queue_repo(mut self, repo: Box<dyn DirtyQueueRepository>) -> Self {
+        self.dirty_queue_repo = Some(repo);
+        self
+    }
+
+    /// Build the transaction context
+    ///
+    /// # Panics
+    /// Panics if required repositories are not set
+    pub fn build(self) -> TransactionContext {
+        TransactionContext {
+            asset_repo: self.asset_repo.expect("Asset repository required"),
+            dependency_repo: self.dependency_repo.expect("Dependency repository required"),
+            dirty_queue_repo: self.dirty_queue_repo.expect("Dirty queue repository required"),
+        }
+    }
+}
+
+impl Default for TransactionContextBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }

@@ -578,8 +578,8 @@ async fn dependency_repo_updates_effective_baseline() {
 
     let upstream = repo.find_upstream_dependencies(&source).await.unwrap();
     assert_eq!(upstream.len(), 1);
-    assert_eq!(upstream[0].declared_version, "1.0.0");
-    assert_eq!(upstream[0].effective_version, "1.1.0");
+    assert_eq!(upstream[0].constraint_str, "^1.0.0");
+    assert_eq!(upstream[0].effective_version.to_string(), "1.1.0");
     assert_eq!(upstream[0].effective_updated_by, "bob");
     assert_eq!(
         upstream[0].effective_reason,
@@ -643,5 +643,5 @@ async fn dependency_repo_downstream_records_include_effective_version() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].source_id, downstream);
     assert_eq!(records[0].target_id, upstream);
-    assert_eq!(records[0].effective_version, "1.0.1");
+    assert_eq!(records[0].effective_version.to_string(), "1.0.1");
 }

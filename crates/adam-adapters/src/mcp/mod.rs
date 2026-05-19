@@ -2210,12 +2210,15 @@ mod tests {
                 source_id: asset.id,
                 target_id: upstream_id,
                 relationship: "depends_on".to_string(),
-                declared_version: "1.0.0".to_string(),
-                effective_version: "1.0.0".to_string(),
+                constraint_str: "1.0.0".to_string(),
+                declared_constraint: adam_domain::VersionConstraint::parse("^1.0.0").unwrap_or_else(|_| adam_domain::VersionConstraint::Exact(adam_domain::SemVer::new(1, 0, 0))),
+                effective_version: adam_domain::SemVer::parse("1.0.0").unwrap_or_else(|_| adam_domain::SemVer::new(0, 0, 0)),
                 effective_updated_by: "publisher".to_string(),
                 effective_updated_at: chrono::Utc::now(),
                 effective_reason: adam_domain::EffectiveUpdateReason::Publish,
                 created_at: chrono::Utc::now(),
+                upgrade_policy: adam_domain::UpgradePolicy::default(),
+                lock_version: 1,
             })
             .await
             .unwrap();

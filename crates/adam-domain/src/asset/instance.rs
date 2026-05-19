@@ -193,6 +193,11 @@ impl AssetInstance {
         self.current_state
     }
 
+    /// Get the current state
+    pub fn current_state(&self) -> AssetState {
+        self.current_state
+    }
+
     /// Get the publisher
     pub fn publisher(&self) -> Option<&String> {
         self.publisher.as_ref()

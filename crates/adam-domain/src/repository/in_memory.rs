@@ -10,10 +10,10 @@ use crate::repository::{
     RepositoryError, UpdateAssetCommand, UpgradePolicy,
 };
 use crate::{
-    DirtyQueueEntry, DirtyQueueRepository, OrganizationId, ProjectId, SemVer, VirtualInstance,
+    DirtyQueueEntry, DirtyQueueRepository, OrganizationId, ProjectId, VirtualInstance,
     VirtualInstanceId, VirtualInstanceRepository,
 };
-use crate::version::VersionConstraint;
+use crate::version::{SemVer, VersionConstraint};
 use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -147,6 +147,48 @@ impl AssetRepository for InMemoryAssetRepository {
             asset.lock_version += 1; // Increment lock on update
             asset.updated_at = Utc::now();
             Ok(())
+        } else {
+            Err(RepositoryError::NotFound(format!("{id:?}")))
+        }
+    }
+
+    async fn update_publication_cas(
+        &self,
+        id: &AssetId,
+        current_version: String,
+        publisher: String,
+        state: AssetState,
+        expected_lock_version: i64,
+    ) -> Result<i64, RepositoryError> {
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+
+        if let Some(asset) = data.get_mut(id) {
+            // CAS check: verify lock_version matches expected
+            if asset.lock_version != expected_lock_version {
+                return Err(RepositoryError::ConcurrentModification {
+                    expected: expected_lock_version,
+                    actual: asset.lock_version,
+                });
+            }
+
+            if !asset.current_state.can_transition_to(state) {
+                return Err(RepositoryError::InvalidStateTransition(format!(
+                    "Cannot transition from {:?} to {:?}",
+                    asset.current_state, state
+                )));
+            }
+            // Parse version string to SemVer
+            let semver = SemVer::parse(&current_version)
+                .map_err(|e| RepositoryError::ValidationError(format!("Invalid version: {e}")))?;
+            asset.current_version = semver;
+            asset.publisher = Some(publisher);
+            asset.current_state = state;
+            asset.lock_version += 1; // Increment lock on update
+            asset.updated_at = Utc::now();
+            Ok(asset.lock_version)
         } else {
             Err(RepositoryError::NotFound(format!("{id:?}")))
         }
@@ -519,8 +561,8 @@ impl DependencyRepository for InMemoryDependencyRepository {
             source_id: *source_id,
             target_id: *target_id,
             relationship: "depends_on".to_string(),
-            declared_constraint: VersionConstraint::parse("^0.0.0").unwrap(),
-            constraint_str: "^0.0.0".to_string(),
+            declared_constraint: VersionConstraint::Wildcard, // Match any version for simple dependencies
+            constraint_str: "*".to_string(),
             effective_version: SemVer::new(0, 0, 0),
             effective_updated_by: "system".to_string(),
             effective_updated_at: now,

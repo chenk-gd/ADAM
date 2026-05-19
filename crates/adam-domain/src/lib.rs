@@ -3,6 +3,7 @@
 pub mod asset;
 pub mod auth;
 pub mod dependency;
+pub mod idempotency;
 pub mod repository;
 pub mod version;
 pub mod virtual_instance;
@@ -28,5 +29,9 @@ pub use repository::{
     DirtyResolutionLogRepository, EffectiveUpdateReason, RepositoryError, UpdateAssetCommand,
     UpgradePolicy,
 };
-pub use version::SemVer;
+pub use idempotency::{
+    IdempotencyError, IdempotencyKey, IdempotencyRecord, IdempotencyRepository,
+    InMemoryIdempotencyRepository,
+};
+pub use version::{SemVer, VersionConstraint};
 pub use virtual_instance::{VirtualInstance, VirtualInstanceId, VirtualInstanceRepository};

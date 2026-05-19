@@ -51,6 +51,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "petgraph",
+ "semver",
  "serde",
  "serde_json",
  "thiserror",

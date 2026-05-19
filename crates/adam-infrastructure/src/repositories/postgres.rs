@@ -9,9 +9,13 @@ use uuid::Uuid;
 use adam_domain::asset::instance::AssetTypeId;
 use adam_domain::asset::state::AssetState;
 use adam_domain::dependency::boundary::AssetLevel;
+use adam_domain::version::VersionConstraint;
+use adam_domain::repository::UpgradePolicy;
+use adam_domain::repository::{TransactionContext, UnitOfWork};
 use adam_domain::{
     AssetDependencyRecord, AssetId, AssetInstance, AssetRepository, AssetType, AssetTypeRepository,
-    CreateAssetCommand, DirtyResolutionLog, DirtyResolutionLogRepository, EffectiveUpdateReason,
+    CreateAssetCommand, DependencyRepository, DirtyQueueEntry, DirtyQueueRepository,
+    DirtyResolutionLog, DirtyResolutionLogRepository, EffectiveUpdateReason,
     OrganizationId, ProjectId, RepositoryError, SemVer, UpdateAssetCommand, VersionStrategy,
     VirtualInstance, VirtualInstanceId, VirtualInstanceRepository,
 };
@@ -338,6 +342,73 @@ impl AssetRepository for PostgresAssetRepository {
         }
 
         Ok(())
+    }
+
+    async fn update_publication_cas(
+        &self,
+        id: &AssetId,
+        current_version: String,
+        publisher: String,
+        state: AssetState,
+        expected_lock_version: i64,
+    ) -> Result<i64, RepositoryError> {
+        let state_str = match state {
+            AssetState::Clean => "clean",
+            AssetState::Dirty => "dirty",
+            AssetState::Archived => "archived",
+        };
+
+        // CAS: Only update if lock_version matches expected
+        let result = sqlx::query(
+            r#"
+            UPDATE asset_instances
+            SET current_version = $1,
+                publisher = $2,
+                current_state = $3,
+                lock_version = lock_version + 1,
+                updated_at = NOW()
+            WHERE id = $4
+              AND lock_version = $5
+            RETURNING lock_version
+            "#,
+        )
+        .bind(&current_version)
+        .bind(&publisher)
+        .bind(state_str)
+        .bind(id.0)
+        .bind(expected_lock_version)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        match result {
+            Some(row) => {
+                let new_lock_version: i64 = row.try_get("lock_version")
+                    .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+                Ok(new_lock_version)
+            }
+            None => {
+                // CAS failed - either asset not found or lock_version mismatch
+                // Check if asset exists to determine error type
+                let exists = sqlx::query("SELECT lock_version FROM asset_instances WHERE id = $1")
+                    .bind(id.0)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+                match exists {
+                    Some(row) => {
+                        let actual: i64 = row.try_get("lock_version")
+                            .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+                        Err(RepositoryError::ConcurrentModification {
+                            expected: expected_lock_version,
+                            actual,
+                        })
+                    }
+                    None => Err(RepositoryError::NotFound(id.0.to_string())),
+                }
+            }
+        }
     }
 
     async fn find_by_project_id(
@@ -763,7 +834,7 @@ impl PostgresDependencyRepository {
             "pin" => UpgradePolicy::Pin,
             _ => UpgradePolicy::default(),
         };
-        let lock_version: i64 = row.get::<i64, _>("lock_version").unwrap_or(1);
+        let lock_version: i64 = row.try_get::<i64, _>("lock_version").unwrap_or(1);
 
         Ok(AssetDependencyRecord {
             id: row.get("id"),
@@ -885,8 +956,8 @@ impl adam_domain::DependencyRepository for PostgresDependencyRepository {
         .bind(record.source_id.0)
         .bind(record.target_id.0)
         .bind(&record.relationship)
-        .bind(&record.declared_version)
-        .bind(&record.effective_version)
+        .bind(&record.constraint_str)
+        .bind(record.effective_version.to_string())
         .bind(&record.effective_updated_by)
         .bind(record.effective_updated_at)
         .bind(record.effective_reason.as_str())
@@ -1339,6 +1410,67 @@ impl VirtualInstanceRepository for PostgresVirtualInstanceRepository {
             .iter()
             .map(|row| self.row_to_virtual_instance(row))
             .collect())
+    }
+}
+
+/// PostgreSQL implementation of UnitOfWork for transaction management
+pub struct PostgresUnitOfWork {
+    pool: PgPool,
+}
+
+impl PostgresUnitOfWork {
+    /// Create a new PostgresUnitOfWork with the given connection pool
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl UnitOfWork for PostgresUnitOfWork {
+    async fn transaction<F, T, E>(&self, operation: F) -> Result<T, E>
+    where
+        F: for<'a> FnOnce(&'a mut TransactionContext)
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, E>> + Send + 'a>>
+            + Send
+            + 'async_trait,
+        E: From<RepositoryError> + Send,
+        T: Send,
+    {
+        // Begin transaction
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| E::from(RepositoryError::DatabaseError(e.to_string())))?;
+
+        // Create transactional repositories
+        let asset_repo = PostgresAssetRepository::new(self.pool.clone());
+        let dependency_repo = PostgresDependencyRepository::new(self.pool.clone());
+        let dirty_queue_repo = PostgresDirtyQueueRepository::new(self.pool.clone());
+
+        // Create transaction context
+        let mut ctx = TransactionContext {
+            asset_repo: Box::new(asset_repo),
+            dependency_repo: Box::new(dependency_repo),
+            dirty_queue_repo: Box::new(dirty_queue_repo),
+        };
+
+        // Execute the operation
+        match operation(&mut ctx).await {
+            Ok(result) => {
+                // Commit transaction
+                tx.commit()
+                    .await
+                    .map_err(|e| E::from(RepositoryError::DatabaseError(e.to_string())))?;
+                Ok(result)
+            }
+            Err(e) => {
+                // Rollback transaction
+                // Note: sqlx transactions auto-rollback on drop, but explicit is clearer
+                let _ = tx.rollback().await;
+                Err(e)
+            }
+        }
     }
 }
 

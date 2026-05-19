@@ -3,11 +3,10 @@
 //! Replaces hardcoded stubs in MCP handlers with actual business logic.
 
 use adam_domain::asset::DependencySnapshot;
-use adam_domain::asset::version::SemVer;
 use adam_domain::{
     AssetDependencyRecord, AssetId, AssetRepository, AssetState, AssetVersion,
     AssetVersionRepository, DependencyRepository, DirtyQueueRepository, DirtyResolutionLog,
-    DirtyResolutionLogRepository, EffectiveUpdateReason, RepositoryError,
+    DirtyResolutionLogRepository, EffectiveUpdateReason, RepositoryError, SemVer, VersionConstraint,
 };
 
 use crate::services::state_propagator::StatePropagator;
@@ -169,11 +168,16 @@ impl<
                     source_id: cmd.asset_id,
                     target_id: dependency.upstream_asset_id,
                     relationship: "depends_on".to_string(),
-                    constraint_str: dependency.version.clone(),
-                    effective_version: dependency.version.clone(),
+                    declared_constraint: adam_domain::version::VersionConstraint::parse(&dependency.version)
+                        .unwrap_or_else(|_| adam_domain::version::VersionConstraint::parse("^0.0.0").unwrap()),
+                    constraint_str: format!("^{}", dependency.version),
+                    effective_version: adam_domain::SemVer::parse(&dependency.version)
+                        .unwrap_or_else(|_| adam_domain::SemVer::new(0, 0, 0)),
                     effective_updated_by: cmd.publisher.clone(),
                     effective_updated_at: now,
                     effective_reason: EffectiveUpdateReason::Publish,
+                    upgrade_policy: adam_domain::UpgradePolicy::default(),
+                    lock_version: 1,
                     created_at: now,
                 })
                 .await
@@ -537,7 +541,7 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source_id, downstream.id);
         assert_eq!(records[0].target_id, upstream.id);
-        assert_eq!(records[0].constraint_str, "1.0.0");
+        assert_eq!(records[0].constraint_str, "^1.0.0");
         assert_eq!(records[0].effective_version.to_string(), "1.0.0");
         assert_eq!(records[0].effective_updated_by, "publisher");
         assert_eq!(records[0].effective_reason, EffectiveUpdateReason::Publish);
@@ -578,12 +582,15 @@ mod tests {
                 source_id: downstream.id,
                 target_id: upstream.id,
                 relationship: "depends_on".to_string(),
+                declared_constraint: adam_domain::version::VersionConstraint::Wildcard,
                 constraint_str: "1.0.0".to_string(),
-                effective_version: "1.0.0".to_string(),
+                effective_version: adam_domain::SemVer::parse("1.0.0").unwrap_or_else(|_| adam_domain::SemVer::new(0, 0, 0)),
                 effective_updated_by: "publisher".to_string(),
                 effective_updated_at: chrono::Utc::now(),
                 effective_reason: EffectiveUpdateReason::Publish,
                 created_at: chrono::Utc::now(),
+                    upgrade_policy: adam_domain::UpgradePolicy::default(),
+                    lock_version: 1,
             })
             .await
             .unwrap();
@@ -719,12 +726,15 @@ mod tests {
                 source_id: asset.id,
                 target_id: upstream_id,
                 relationship: "depends_on".to_string(),
+                declared_constraint: adam_domain::version::VersionConstraint::Wildcard,
                 constraint_str: "0.0.0".to_string(),
-                effective_version: "0.0.0".to_string(),
+                effective_version: adam_domain::SemVer::parse("0.0.0").unwrap_or_else(|_| adam_domain::SemVer::new(0, 0, 0)),
                 effective_updated_by: "publisher".to_string(),
                 effective_updated_at: chrono::Utc::now(),
                 effective_reason: EffectiveUpdateReason::Publish,
                 created_at: chrono::Utc::now(),
+                    upgrade_policy: adam_domain::UpgradePolicy::default(),
+                    lock_version: 1,
             })
             .await
             .unwrap();
@@ -835,12 +845,15 @@ mod tests {
                     source_id: asset.id,
                     target_id: upstream_id,
                     relationship: "depends_on".to_string(),
+                    declared_constraint: adam_domain::version::VersionConstraint::Wildcard,
                     constraint_str: "1.0.0".to_string(),
-                    effective_version: "1.0.0".to_string(),
+                    effective_version: adam_domain::SemVer::parse("1.0.0").unwrap_or_else(|_| adam_domain::SemVer::new(0, 0, 0)),
                     effective_updated_by: "publisher".to_string(),
                     effective_updated_at: chrono::Utc::now(),
                     effective_reason: EffectiveUpdateReason::Publish,
                     created_at: chrono::Utc::now(),
+                    upgrade_policy: adam_domain::UpgradePolicy::default(),
+                    lock_version: 1,
                 })
                 .await
                 .unwrap();
@@ -952,12 +965,15 @@ mod tests {
                     source_id,
                     target_id,
                     relationship: "depends_on".to_string(),
+                    declared_constraint: VersionConstraint::parse("^1.0.0").unwrap_or_else(|_| VersionConstraint::Exact(SemVer::new(1, 0, 0))),
                     constraint_str: "1.0.0".to_string(),
-                    effective_version: "1.0.0".to_string(),
+                    effective_version: SemVer::parse("1.0.0").unwrap_or_else(|_| SemVer::new(0, 0, 0)),
                     effective_updated_by: "publisher".to_string(),
                     effective_updated_at: chrono::Utc::now(),
                     effective_reason: EffectiveUpdateReason::Publish,
                     created_at: chrono::Utc::now(),
+                    upgrade_policy: adam_domain::UpgradePolicy::default(),
+                    lock_version: 1,
                 })
                 .await
                 .unwrap();
