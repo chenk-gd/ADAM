@@ -284,6 +284,7 @@ impl AssetRepository for PostgresAssetRepository {
             AssetState::Clean => "clean",
             AssetState::Dirty => "dirty",
             AssetState::Archived => "archived",
+            AssetState::Final => "final",
         };
 
         let result = sqlx::query(
@@ -317,6 +318,7 @@ impl AssetRepository for PostgresAssetRepository {
             AssetState::Clean => "clean",
             AssetState::Dirty => "dirty",
             AssetState::Archived => "archived",
+            AssetState::Final => "final",
         };
 
         let result = sqlx::query(
@@ -356,6 +358,7 @@ impl AssetRepository for PostgresAssetRepository {
             AssetState::Clean => "clean",
             AssetState::Dirty => "dirty",
             AssetState::Archived => "archived",
+            AssetState::Final => "final",
         };
 
         // CAS: Only update if lock_version matches expected
@@ -631,6 +634,7 @@ impl PostgresAssetRepository {
                 "clean" => AssetState::Clean,
                 "dirty" => AssetState::Dirty,
                 "archived" => AssetState::Archived,
+                "final" => AssetState::Final,
                 _ => {
                     return Err(RepositoryError::DatabaseError(format!(
                         "Invalid state: {state_str}"

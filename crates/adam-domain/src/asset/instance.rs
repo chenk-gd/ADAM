@@ -223,7 +223,70 @@ impl AssetInstance {
         self.idempotency_key.as_ref()
     }
 
-    /// Mark the asset as dirty (transition from Clean to Dirty)
+    /// Create a new immutable project-level asset (e.g., code_commit)
+    /// Immutable assets are created in Final state and never change state
+    pub fn new_immutable_project_level(
+        name: impl Into<String>,
+        asset_type_id: AssetTypeId,
+        project_id: ProjectId,
+        organization_id: OrganizationId,
+        external_ref: impl Into<String>,
+        source: impl Into<String>,
+        metadata: serde_json::Value,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: AssetId::new(),
+            name: name.into(),
+            asset_type_id,
+            project_id: Some(project_id),
+            organization_id,
+            level: AssetLevel::Project,
+            current_state: AssetState::Final, // Immutable assets start in Final state
+            external_ref: external_ref.into(),
+            source: source.into(),
+            metadata,
+            assignees: vec![],
+            publisher: None,
+            current_version: SemVer::new(0, 0, 0), // Placeholder, external_ref is the actual version
+            lock_version: 1,
+            created_at: now,
+            updated_at: now,
+            idempotency_key: None,
+        }
+    }
+
+    /// Create a new immutable organization-level asset (e.g., pipeline_run)
+    /// Immutable assets are created in Final state and never change state
+    pub fn new_immutable_organization_level(
+        name: impl Into<String>,
+        asset_type_id: AssetTypeId,
+        organization_id: OrganizationId,
+        external_ref: impl Into<String>,
+        source: impl Into<String>,
+        metadata: serde_json::Value,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: AssetId::new(),
+            name: name.into(),
+            asset_type_id,
+            project_id: None,
+            organization_id,
+            level: AssetLevel::Organization,
+            current_state: AssetState::Final, // Immutable assets start in Final state
+            external_ref: external_ref.into(),
+            source: source.into(),
+            metadata,
+            assignees: vec![],
+            publisher: None,
+            current_version: SemVer::new(0, 0, 0), // Placeholder, external_ref is the actual version
+            lock_version: 1,
+            created_at: now,
+            updated_at: now,
+            idempotency_key: None,
+        }
+    }
     pub fn mark_dirty(&mut self) -> Result<(), StateError> {
         self.current_state.validate_transition(AssetState::Dirty)?;
         self.current_state = AssetState::Dirty;

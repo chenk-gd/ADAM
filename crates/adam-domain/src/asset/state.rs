@@ -33,6 +33,8 @@ pub enum AssetState {
     Dirty,
     /// Asset no longer maintained, read-only
     Archived,
+    /// Immutable asset (code_commit, pipeline_run) - final state, no transitions
+    Final,
 }
 
 impl AssetState {
@@ -41,13 +43,17 @@ impl AssetState {
     /// # State Transition Rules
     /// - Clean -> Dirty: When upstream dependency published
     /// - Clean -> Archived: Manual archival
+    /// - Clean -> Clean: Idempotent
     /// - Dirty -> Clean: Manual resolution
     /// - Dirty -> Archived: Manual archival while dirty
     /// - Archived -> *: No transitions allowed (terminal state)
+    /// - Final -> *: No transitions allowed (immutable, terminal state)
     pub fn can_transition_to(&self, target: AssetState) -> bool {
         match (*self, target) {
             // Archived is terminal state - no transitions allowed
             (AssetState::Archived, _) => false,
+            // Final is terminal state for immutable assets - no transitions allowed
+            (AssetState::Final, _) => false,
             // Same state is always allowed (idempotent)
             (s, t) if s == t => true,
             // All other transitions are valid
@@ -69,12 +75,13 @@ impl AssetState {
 
     /// Check if the asset can be published
     /// Publishing is allowed for Clean and Dirty states
+    /// Final and Archived assets cannot be published (they are immutable)
     pub fn can_publish(&self) -> bool {
         matches!(self, AssetState::Clean | AssetState::Dirty)
     }
 
     /// Check if the asset can be depended upon
-    /// Archived assets cannot be depended upon
+    /// All states can be depended upon except Archived
     pub fn can_depend(&self) -> bool {
         !self.is_archived()
     }
@@ -88,6 +95,18 @@ impl AssetState {
     pub fn is_archived(&self) -> bool {
         matches!(self, AssetState::Archived)
     }
+
+    /// Check if the asset is in Final state (immutable)
+    pub fn is_final(&self) -> bool {
+        matches!(self, AssetState::Final)
+    }
+
+    /// Check if the asset can receive dirty propagation
+    /// Only Clean assets can become Dirty
+    /// Final assets are immutable and never become Dirty
+    pub fn can_receive_dirty(&self) -> bool {
+        matches!(self, AssetState::Clean)
+    }
 }
 
 impl std::fmt::Display for AssetState {
@@ -96,6 +115,7 @@ impl std::fmt::Display for AssetState {
             AssetState::Clean => write!(f, "Clean"),
             AssetState::Dirty => write!(f, "Dirty"),
             AssetState::Archived => write!(f, "Archived"),
+            AssetState::Final => write!(f, "Final"),
         }
     }
 }
@@ -119,14 +139,26 @@ mod tests {
         assert!(!AssetState::Archived.can_transition_to(AssetState::Clean));
         assert!(!AssetState::Archived.can_transition_to(AssetState::Dirty));
         assert!(!AssetState::Archived.can_transition_to(AssetState::Archived));
+        assert!(!AssetState::Archived.can_transition_to(AssetState::Final));
     }
 
     #[test]
-    fn test_same_state_transition_is_allowed_except_archived() {
+    fn test_cannot_transition_from_final() {
+        // Final is terminal state for immutable assets
+        assert!(!AssetState::Final.can_transition_to(AssetState::Clean));
+        assert!(!AssetState::Final.can_transition_to(AssetState::Dirty));
+        assert!(!AssetState::Final.can_transition_to(AssetState::Archived));
+        assert!(!AssetState::Final.can_transition_to(AssetState::Final));
+    }
+
+    #[test]
+    fn test_same_state_transition_is_allowed_except_archived_and_final() {
         assert!(AssetState::Clean.can_transition_to(AssetState::Clean));
         assert!(AssetState::Dirty.can_transition_to(AssetState::Dirty));
         // Archived is terminal - no transitions allowed, including self
         assert!(!AssetState::Archived.can_transition_to(AssetState::Archived));
+        // Final is terminal - no transitions allowed, including self
+        assert!(!AssetState::Final.can_transition_to(AssetState::Final));
     }
 
     #[test]
@@ -134,6 +166,8 @@ mod tests {
         assert!(AssetState::Clean.can_publish());
         assert!(AssetState::Dirty.can_publish());
         assert!(!AssetState::Archived.can_publish());
+        // Final assets cannot be published (they are immutable)
+        assert!(!AssetState::Final.can_publish());
     }
 
     #[test]
@@ -141,6 +175,26 @@ mod tests {
         assert!(AssetState::Clean.can_depend());
         assert!(AssetState::Dirty.can_depend());
         assert!(!AssetState::Archived.can_depend());
+        // Final assets can be depended upon
+        assert!(AssetState::Final.can_depend());
+    }
+
+    #[test]
+    fn test_is_final() {
+        assert!(!AssetState::Clean.is_final());
+        assert!(!AssetState::Dirty.is_final());
+        assert!(!AssetState::Archived.is_final());
+        assert!(AssetState::Final.is_final());
+    }
+
+    #[test]
+    fn test_can_receive_dirty() {
+        // Only Clean assets can receive dirty propagation
+        assert!(AssetState::Clean.can_receive_dirty());
+        assert!(!AssetState::Dirty.can_receive_dirty());
+        assert!(!AssetState::Archived.can_receive_dirty());
+        // Final assets are immutable and never become Dirty
+        assert!(!AssetState::Final.can_receive_dirty());
     }
 
     #[test]

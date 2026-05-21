@@ -312,6 +312,7 @@ pub enum AssetStateDto {
     Clean,
     Dirty,
     Archived,
+    Final,
 }
 
 impl From<AssetState> for AssetStateDto {
@@ -320,6 +321,7 @@ impl From<AssetState> for AssetStateDto {
             AssetState::Clean => AssetStateDto::Clean,
             AssetState::Dirty => AssetStateDto::Dirty,
             AssetState::Archived => AssetStateDto::Archived,
+            AssetState::Final => AssetStateDto::Final,
         }
     }
 }
@@ -758,6 +760,7 @@ pub async fn list_assets(
                     "clean" => a.state() == AssetState::Clean,
                     "dirty" => a.state() == AssetState::Dirty,
                     "archived" => a.state() == AssetState::Archived,
+                    "final" => a.state() == AssetState::Final,
                     _ => true,
                 };
                 if !matches {
