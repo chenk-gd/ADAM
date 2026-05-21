@@ -1473,7 +1473,7 @@ impl ServerHandler for AdamMcpServer {
                 version: "0.1.0".into(),
             },
             instructions: Some(
-                "ADAM Asset Management MCP Server for querying and managing R&D assets".into(),
+                "ADAM Agent-oriented Development Asset Management MCP Server for querying and managing R&D assets".into(),
             ),
             ..Default::default()
         }

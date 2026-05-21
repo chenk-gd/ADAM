@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ADAM is a **Research and Development Asset Management System** (研发资产管理系统) written in Rust. It provides a platform for managing R&D assets (requirements, design documents, code commits, test cases, pipelines) with dependency tracking and lifecycle management.
+ADAM is an **Agent-oriented Development Asset Management System** (研发资产管理系统) written in Rust. It provides a platform for managing R&D assets (requirements, design documents, code commits, test cases, pipelines) with dependency tracking and lifecycle management.
 
 ### Core Purpose
 - Asset type management with JSON Schema metadata

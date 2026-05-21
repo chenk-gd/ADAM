@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ADAM REST API
-  description: Research and Development Asset Management System REST API
+  description: Agent-oriented Development Asset Management System REST API
   version: 0.1.0
 
 servers:

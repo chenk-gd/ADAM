@@ -3,7 +3,7 @@
 [![Rust](https://img.shields.io/badge/Rust-1.85+-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**ADAM** (Asset Dependency and Management) 是一个研发资产管理平台，支持依赖追踪和生命周期管理。它为大型语言模型（LLM）提供上下文服务，结构化地管理需求、设计文档、代码提交、测试用例和流水线等研发资产。
+**ADAM** (Agent-oriented Development Asset Management) 是一个研发资产管理平台，支持依赖追踪和生命周期管理。它为大型语言模型（LLM）提供上下文服务，结构化地管理需求、设计文档、代码提交、测试用例和流水线等研发资产。
 
 ---
 

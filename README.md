@@ -1,9 +1,9 @@
-# ADAM — Research and Development Asset Management System
+# ADAM — Agent-oriented Development Asset Management System
 
 [![Rust](https://img.shields.io/badge/Rust-1.85+-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**ADAM** (Asset Dependency and Management) is a platform for managing R&D assets with dependency tracking and lifecycle management. It serves as a context service for Large Language Models (LLMs), providing structured access to requirements, design documents, code commits, test cases, and pipelines.
+**ADAM** (Agent-oriented Development Asset Management) is a platform for managing R&D assets with dependency tracking and lifecycle management. It serves as a context service for Large Language Models (LLMs), providing structured access to requirements, design documents, code commits, test cases, and pipelines.
 
 ---
 
