@@ -71,12 +71,13 @@ Pre-defined and extensible asset types:
 - **Clean** — Asset is up-to-date with upstream dependencies
 - **Dirty** — Upstream dependency has newer version, awaiting review
 - **Archived** — Asset is read-only, no longer maintained
+- **Final** — Immutable asset (code_commit, pipeline_run), created in final state
 
-### Dependency Model
-- Strict DAG (Directed Acyclic Graph) — no cycles allowed
-- Declared version — snapshot at publish time for audit trail
-- Effective version — current baseline for dirty checking
-- State propagation — only publish triggers downstream dirty state
+### Asset Mutability
+| Asset Type | State | Receives Dirty |
+|------------|-------|----------------|
+| requirement, design_doc, work_item, test_case | Clean/Dirty/Archived | Yes |
+| code_commit, pipeline_run | **Final** | **No** |
 
 ## Quick Start
 

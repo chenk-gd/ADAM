@@ -14,6 +14,7 @@
 |--------|------|----------|
 | **依赖方向** | `source_id` = 下游/依赖方，`target_id` = 上游/被依赖方 | 数据库、代码、文档 |
 | **状态存储** | `current_state` 仅存储枚举标签，Dirty详情存 `dirty_queue` 表，Archived详情存 `asset_instances` 字段 | 数据库 schema |
+| **状态类型** | Clean/Dirty/Archived 为可变状态；**Final 为不可变状态**，创建后永不改变，不接收 Dirty 传播 | AssetState enum |
 | **版本策略** | 资产类型可配置版本策略：SemVer / ExternalRef / Composite | AssetType.version_strategy |
 | **层级边界** | 持久化依赖边只允许项目内项目级资产之间、或组织内组织级资产之间；项目查询可合并组织级资产但不形成依赖边 | 应用服务层验证、数据库约束 |
 | **发布事务** | 发布资产 = 创建版本 + 更新当前版本 + 可选触发下游 Dirty | 事务边界 |
@@ -3086,12 +3087,19 @@ impl AdamMcpServer {
 ```rust
 /// 状态转换矩阵
 ///
-/// 当前状态 ╲ 事件    │ 上游发布     │ 自身发布    │ 手工 Clean  │ 归档
-/// ───────────────────┼──────────────┼─────────────┼────────────┼────────
-/// Clean             │ -> Dirty     │ -> Clean    │ -          │ -> Archived
-/// Dirty             │ 合并来源     │ -> Clean    │ -> Clean   │ -> Archived
-/// Archived          │ -            │ -           │ -          │ -
+/// 当前状态 ╲ 事件    │ 上游发布     │ 自身发布    │ 手工 Clean  │ 归档       │ 说明
+/// ───────────────────┼──────────────┼─────────────┼────────────┼───────────┼────────────────────
+/// Clean             │ -> Dirty     │ -> Clean    │ -          │ -> Archived│ 可变资产默认状态
+/// Dirty             │ 合并来源     │ -> Clean    │ -> Clean   │ -> Archived│ 需要更新
+/// Archived          │ -            │ -           │ -          │ -          │ 归档（终态）
+/// **Final**         │ **-**        │ **-**       │ **-**      │ **-**      │ **不可变资产终态**
 ```
+
+**Final 状态说明**：
+- 不可变资产（code_commit, pipeline_run）创建时即处于 Final 状态
+- Final 资产**不接收** Dirty 传播（上游变化不会使其变 Dirty）
+- Final 资产**不能**进行任何状态转换（包括自身发布、手工 Clean、归档）
+- Final 资产可以被依赖（如 test_case 依赖 code_commit），但不会传播 Dirty 给下游
 
 ### 8.2 传播流程（含Dirty队列）
 
