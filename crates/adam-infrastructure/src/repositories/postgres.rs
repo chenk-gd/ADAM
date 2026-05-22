@@ -14,8 +14,7 @@ use adam_domain::repository::UpgradePolicy;
 use adam_domain::repository::{TransactionContext, UnitOfWork};
 use adam_domain::{
     AssetDependencyRecord, AssetId, AssetInstance, AssetRepository, AssetType, AssetTypeRepository,
-    CreateAssetCommand, DependencyRepository, DirtyQueueEntry, DirtyQueueRepository,
-    DirtyResolutionLog, DirtyResolutionLogRepository, EffectiveUpdateReason,
+    CreateAssetCommand, DirtyResolutionLog, DirtyResolutionLogRepository, EffectiveUpdateReason,
     OrganizationId, ProjectId, RepositoryError, SemVer, UpdateAssetCommand, VersionStrategy,
     VirtualInstance, VirtualInstanceId, VirtualInstanceRepository,
 };
@@ -1441,7 +1440,7 @@ impl UnitOfWork for PostgresUnitOfWork {
         T: Send,
     {
         // Begin transaction
-        let mut tx = self
+        let tx = self
             .pool
             .begin()
             .await
