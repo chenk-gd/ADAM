@@ -18,9 +18,10 @@ pub enum ConfigCacheError {
 }
 
 /// Constraint template for default constraint generation
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ConstraintTemplate {
     /// Follow major version (^1.0.0)
+    #[default]
     FollowMajor,
     /// Exact current version (=1.0.0)
     ExactCurrent,
@@ -28,12 +29,6 @@ pub enum ConstraintTemplate {
     FollowMinor,
     /// Any version (*)
     Wildcard,
-}
-
-impl Default for ConstraintTemplate {
-    fn default() -> Self {
-        ConstraintTemplate::FollowMajor
-    }
 }
 
 impl ConstraintTemplate {
@@ -187,9 +182,13 @@ impl<T: Clone> CacheEntry<T> {
 }
 
 /// Configuration cache for layered config resolution
+type TypeRuleCache =
+    Arc<RwLock<HashMap<(AssetTypeId, AssetTypeId), CacheEntry<DependencyTypeRule>>>>;
+type OrganizationPolicyCache = Arc<RwLock<HashMap<OrganizationId, CacheEntry<OrganizationPolicy>>>>;
+
 pub struct ConfigCache {
-    type_rules: Arc<RwLock<HashMap<(AssetTypeId, AssetTypeId), CacheEntry<DependencyTypeRule>>>>,
-    org_policies: Arc<RwLock<HashMap<OrganizationId, CacheEntry<OrganizationPolicy>>>>,
+    type_rules: TypeRuleCache,
+    org_policies: OrganizationPolicyCache,
     ttl: chrono::Duration,
     type_rule_repo: Arc<dyn DependencyTypeRuleRepository>,
     org_policy_repo: Arc<dyn OrganizationPolicyRepository>,
@@ -392,6 +391,12 @@ impl InMemoryDependencyTypeRuleRepository {
     }
 }
 
+impl Default for InMemoryDependencyTypeRuleRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl DependencyTypeRuleRepository for InMemoryDependencyTypeRuleRepository {
     async fn find_by_organization(
@@ -440,6 +445,12 @@ impl InMemoryOrganizationPolicyRepository {
     pub async fn save(&self, policy: OrganizationPolicy) {
         let mut policies = self.policies.write().await;
         policies.insert(policy.organization_id, policy);
+    }
+}
+
+impl Default for InMemoryOrganizationPolicyRepository {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -519,7 +530,10 @@ mod tests {
         // Verify cache hits
         let cached_rule = cache.get_type_rule(downstream_type, upstream_type).await;
         assert!(cached_rule.is_some());
-        assert_eq!(cached_rule.unwrap().default_policy, UpgradePolicy::AutoPatch);
+        assert_eq!(
+            cached_rule.unwrap().default_policy,
+            UpgradePolicy::AutoPatch
+        );
 
         let cached_policy = cache.get_org_policy(org_id).await.unwrap();
         assert_eq!(cached_policy.default_policy, UpgradePolicy::Notify);

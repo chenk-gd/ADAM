@@ -1,8 +1,8 @@
 //! Asset lifecycle service with CAS optimistic locking
 
 use adam_domain::{
-    AssetId, AssetRepository, AssetState, AssetVersion, AssetVersionId, AssetVersionRepository,
-    IdempotencyKey, IdempotencyRecord, IdempotencyRepository, RepositoryError, SemVer,
+    AssetId, AssetRepository, AssetState, AssetVersion, AssetVersionRepository, IdempotencyKey,
+    IdempotencyRecord, IdempotencyRepository, RepositoryError, SemVer,
 };
 use std::sync::Arc;
 
@@ -92,11 +92,7 @@ where
     PR: crate::services::StatePropagationPort,
 {
     /// Create a new AssetLifecycleService
-    pub fn new(
-        asset_repo: Arc<AR>,
-        version_repo: Arc<VR>,
-        propagation_service: Arc<PR>,
-    ) -> Self {
+    pub fn new(asset_repo: Arc<AR>, version_repo: Arc<VR>, propagation_service: Arc<PR>) -> Self {
         Self {
             asset_repo,
             version_repo,
@@ -135,7 +131,7 @@ where
             .asset_repo
             .find_by_id(&asset_id)
             .await?
-            .ok_or_else(|| AssetLifecycleError::NotFound(format!("{:?}", asset_id)))?;
+            .ok_or_else(|| AssetLifecycleError::NotFound(format!("{asset_id:?}")))?;
 
         // Check lock version
         if asset.lock_version() != expected_lock_version {
@@ -149,7 +145,8 @@ where
         if new_version <= *asset.current_version() {
             return Err(AssetLifecycleError::InvalidState(format!(
                 "New version {} must be greater than current version {}",
-                new_version, asset.current_version()
+                new_version,
+                asset.current_version()
             )));
         }
 
@@ -165,7 +162,7 @@ where
             asset_id,
             new_version.to_string(),
             serde_json::json!({"content_ref": content_ref}),
-            vec![], // empty dependencies for now
+            vec![],         // empty dependencies for now
             "".to_string(), // release notes
             publisher.clone(),
         );
@@ -216,7 +213,7 @@ where
                 .asset_repo
                 .find_by_id(&asset_id)
                 .await?
-                .ok_or_else(|| AssetLifecycleError::NotFound(format!("{:?}", asset_id)))?;
+                .ok_or_else(|| AssetLifecycleError::NotFound(format!("{asset_id:?}")))?;
 
             let expected_version = asset.lock_version();
 
@@ -235,10 +232,8 @@ where
                     if attempt < config.max_retries =>
                 {
                     // Exponential backoff
-                    let delay = std::cmp::min(
-                        config.base_delay * 2u32.pow(attempt),
-                        config.max_delay,
-                    );
+                    let delay =
+                        std::cmp::min(config.base_delay * 2u32.pow(attempt), config.max_delay);
                     tokio::time::sleep(delay).await;
 
                     attempt += 1;
@@ -292,10 +287,7 @@ where
     IR: IdempotencyRepository,
 {
     /// Create a new idempotent service wrapping an existing lifecycle service
-    pub fn new(
-        inner: AssetLifecycleService<AR, VR, PR>,
-        idempotency_repo: Arc<IR>,
-    ) -> Self {
+    pub fn new(inner: AssetLifecycleService<AR, VR, PR>, idempotency_repo: Arc<IR>) -> Self {
         Self {
             inner,
             idempotency_repo,
@@ -320,9 +312,10 @@ where
                 let version = self.find_version_by_id(&existing.response_id).await?;
                 return Ok(version);
             } else {
-                return Err(AssetLifecycleError::IdempotencyConflict(
-                    format!("Key {:?} already used with different request", request.idempotency_key)
-                ));
+                return Err(AssetLifecycleError::IdempotencyConflict(format!(
+                    "Key {:?} already used with different request",
+                    request.idempotency_key
+                )));
             }
         }
 
@@ -342,11 +335,7 @@ where
         let request_hash = self.compute_request_hash(&request);
         // Store asset_id:version as the response identifier
         let response_id = format!("{}:{}", request.asset_id.0, version.version_number);
-        let record = IdempotencyRecord::new(
-            request.idempotency_key,
-            request_hash,
-            response_id,
-        );
+        let record = IdempotencyRecord::new(request.idempotency_key, request_hash, response_id);
         self.idempotency_repo.save(&record).await?;
 
         Ok(version)
@@ -358,22 +347,32 @@ where
         // Parse the identifier
         let parts: Vec<&str> = id.split(':').collect();
         if parts.len() != 2 {
-            return Err(AssetLifecycleError::NotFound(format!("Invalid response ID format: {}", id)));
+            return Err(AssetLifecycleError::NotFound(format!(
+                "Invalid response ID format: {id}"
+            )));
         }
 
         let asset_uuid = match uuid::Uuid::parse_str(parts[0]) {
             Ok(uuid) => uuid,
             Err(_) => {
-                return Err(AssetLifecycleError::NotFound(format!("Invalid asset UUID in response ID: {}", id)))
+                return Err(AssetLifecycleError::NotFound(format!(
+                    "Invalid asset UUID in response ID: {id}"
+                )));
             }
         };
         let asset_id = AssetId(asset_uuid);
         let version_number = parts[1];
 
         // Find the version
-        match self.inner.find_version_by_asset_and_version(&asset_id, version_number).await {
+        match self
+            .inner
+            .find_version_by_asset_and_version(&asset_id, version_number)
+            .await
+        {
             Ok(Some(version)) => Ok(version),
-            Ok(None) => Err(AssetLifecycleError::NotFound(format!("Version not found: {}", id))),
+            Ok(None) => Err(AssetLifecycleError::NotFound(format!(
+                "Version not found: {id}"
+            ))),
             Err(e) => Err(e),
         }
     }
@@ -383,10 +382,7 @@ where
         // Simple hash combination without external crate
         format!(
             "{:?}:{}:{}:{}",
-            request.asset_id,
-            request.new_version,
-            request.content_ref,
-            request.publisher
+            request.asset_id, request.new_version, request.content_ref, request.publisher
         )
     }
 }
@@ -395,8 +391,8 @@ where
 mod tests {
     use super::*;
     use adam_domain::{
-        AssetLevel, AssetTypeId, CreateAssetCommand, InMemoryAssetRepository, InMemoryAssetVersionRepository,
-        OrganizationId,
+        AssetLevel, AssetTypeId, CreateAssetCommand, InMemoryAssetRepository,
+        InMemoryAssetVersionRepository, OrganizationId,
     };
 
     /// Mock propagation port for testing
@@ -419,11 +415,8 @@ mod tests {
         let version_repo = Arc::new(InMemoryAssetVersionRepository::new());
         let propagation = Arc::new(MockPropagationPort);
 
-        let service = AssetLifecycleService::new(
-            asset_repo.clone(),
-            version_repo.clone(),
-            propagation,
-        );
+        let service =
+            AssetLifecycleService::new(asset_repo.clone(), version_repo.clone(), propagation);
 
         // Create an asset
         let org_id = OrganizationId::new();
@@ -463,11 +456,8 @@ mod tests {
         let version_repo = Arc::new(InMemoryAssetVersionRepository::new());
         let propagation = Arc::new(MockPropagationPort);
 
-        let service = AssetLifecycleService::new(
-            asset_repo.clone(),
-            version_repo.clone(),
-            propagation,
-        );
+        let service =
+            AssetLifecycleService::new(asset_repo.clone(), version_repo.clone(), propagation);
 
         // Create an asset
         let org_id = OrganizationId::new();
@@ -498,7 +488,10 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(result, Err(AssetLifecycleError::ConcurrentModification { .. })));
+        assert!(matches!(
+            result,
+            Err(AssetLifecycleError::ConcurrentModification { .. })
+        ));
     }
 
     #[tokio::test]
@@ -507,11 +500,8 @@ mod tests {
         let version_repo = Arc::new(InMemoryAssetVersionRepository::new());
         let propagation = Arc::new(MockPropagationPort);
 
-        let service = AssetLifecycleService::new(
-            asset_repo.clone(),
-            version_repo.clone(),
-            propagation,
-        );
+        let service =
+            AssetLifecycleService::new(asset_repo.clone(), version_repo.clone(), propagation);
 
         // Create an asset
         let org_id = OrganizationId::new();

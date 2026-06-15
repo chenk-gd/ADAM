@@ -19,9 +19,9 @@ use std::sync::Arc;
 
 use adam_domain::{
     AssetId, AssetInstance, AssetRepository, AssetTypeId, AssetVersionRepository, AuthPrincipal,
-    AuthorizationError, AuthorizationService, DependencyRepository, DirtyQueueRepository,
-    DirtyResolutionLogRepository, OrganizationId, Permission, ProjectId, RepositoryError,
-    VirtualInstance, VirtualInstanceRepository,
+    AuthorizationError, AuthorizationService, DependencyRepository, DependencyRuleRepository,
+    DirtyQueueRepository, DirtyResolutionLogRepository, OrganizationId, Permission, ProjectId,
+    RepositoryError, VirtualInstance, VirtualInstanceRepository,
 };
 
 // ============================================================================
@@ -33,6 +33,7 @@ use adam_domain::{
 pub struct McpServerState {
     pub asset_repo: Arc<dyn AssetRepository>,
     pub dependency_repo: Arc<dyn DependencyRepository>,
+    pub dependency_rule_repo: Arc<dyn DependencyRuleRepository>,
     pub dirty_repo: Arc<dyn DirtyQueueRepository>,
     pub version_repo: Arc<dyn AssetVersionRepository>,
     pub dirty_log_repo: Arc<dyn DirtyResolutionLogRepository>,
@@ -242,6 +243,10 @@ pub struct PublishAssetRequest {
     pub version: Option<String>,
     /// Dependency IDs to include in publish
     pub dependencies: Option<Vec<String>>,
+    /// Relationship types for each dependency (snake_case: depends_on, references, implements, fixes, verifies, executes, produces, blocks, relates_to)
+    pub relationships: Option<Vec<String>>,
+    /// Propagation policies for each dependency (snake_case: dirty, context_only, audit_only)
+    pub propagation_policies: Option<Vec<String>>,
 }
 
 /// Published version info
@@ -903,9 +908,10 @@ impl AdamMcpServer {
             };
             dependencies.push(PublishDependency {
                 upstream_asset_id,
-                version: upstream
-                    .current_version()
-                    .to_string(),
+                version: upstream.current_version().to_string(),
+                relationship: None,
+                propagation_policy: None,
+                upgrade_policy: None,
             });
         }
 
@@ -917,14 +923,17 @@ impl AdamMcpServer {
             self.state.dirty_log_repo.clone(),
         );
         let published = match service
-            .publish(PublishAssetCommand {
-                asset_id,
-                version: version.clone(),
-                publisher: self.state.principal.id.clone(),
-                release_notes: String::new(),
-                dependencies,
-                suggested_type: None,
-            })
+            .publish(
+                PublishAssetCommand {
+                    asset_id,
+                    version: version.clone(),
+                    publisher: self.state.principal.id.clone(),
+                    release_notes: String::new(),
+                    dependencies,
+                    suggested_type: None,
+                },
+                self.state.dependency_rule_repo.as_ref(),
+            )
             .await
         {
             Ok(version) => version,
@@ -1575,6 +1584,7 @@ mod tests {
         McpServerState {
             asset_repo: Arc::new(InMemoryAssetRepository::new()),
             dependency_repo: Arc::new(adam_domain::InMemoryDependencyRepository::new()),
+            dependency_rule_repo: Arc::new(adam_domain::InMemoryDependencyRuleRepository::new()),
             dirty_repo: Arc::new(InMemoryDirtyQueueRepository::new()),
             version_repo: Arc::new(adam_domain::InMemoryAssetVersionRepository::new()),
             dirty_log_repo: Arc::new(adam_domain::InMemoryDirtyResolutionLogRepository::new()),
@@ -1944,6 +1954,8 @@ mod tests {
             asset_id: asset.id.0.to_string(),
             version: Some("1.0.0".to_string()),
             dependencies: None,
+            relationships: None,
+            propagation_policies: None,
         };
 
         let result = server.publish_asset(request).await;
@@ -2026,6 +2038,8 @@ mod tests {
             asset_id: "invalid-uuid".to_string(),
             version: Some("1.0.0".to_string()),
             dependencies: None,
+            relationships: None,
+            propagation_policies: None,
         };
 
         let result = server.publish_asset(request).await;
@@ -2046,6 +2060,8 @@ mod tests {
             asset_id: uuid::Uuid::new_v4().to_string(),
             version: Some("1.0.0".to_string()),
             dependencies: None,
+            relationships: None,
+            propagation_policies: None,
         };
 
         let result = server.publish_asset(request).await;
@@ -2086,6 +2102,8 @@ mod tests {
             asset_id: asset.id.0.to_string(),
             version: Some("1.0.0".to_string()),
             dependencies: None,
+            relationships: None,
+            propagation_policies: None,
         };
 
         let result = server.publish_asset(request).await;
@@ -2148,6 +2166,8 @@ mod tests {
             asset_id: upstream.id.0.to_string(),
             version: Some("2.0.0".to_string()),
             dependencies: None,
+            relationships: None,
+            propagation_policies: None,
         };
 
         let result = server.publish_asset(request).await;
@@ -2205,21 +2225,22 @@ mod tests {
         let upstream_id = AssetId::new();
         state
             .dependency_repo
-            .create_dependency_record(&adam_domain::AssetDependencyRecord {
-                id: uuid::Uuid::new_v4(),
-                source_id: asset.id,
-                target_id: upstream_id,
-                relationship: "depends_on".to_string(),
-                constraint_str: "1.0.0".to_string(),
-                declared_constraint: adam_domain::VersionConstraint::parse("^1.0.0").unwrap_or_else(|_| adam_domain::VersionConstraint::Exact(adam_domain::SemVer::new(1, 0, 0))),
-                effective_version: adam_domain::SemVer::parse("1.0.0").unwrap_or_else(|_| adam_domain::SemVer::new(0, 0, 0)),
-                effective_updated_by: "publisher".to_string(),
-                effective_updated_at: chrono::Utc::now(),
-                effective_reason: adam_domain::EffectiveUpdateReason::Publish,
-                created_at: chrono::Utc::now(),
-                upgrade_policy: adam_domain::UpgradePolicy::default(),
-                lock_version: 1,
-            })
+            .create_dependency_record(
+                &adam_domain::AssetDependencyRecord::new(adam_domain::NewDependencyRecord {
+                    source_id: asset.id,
+                    target_id: upstream_id,
+                    relationship: adam_domain::RelationshipType::DependsOn,
+                    declared_constraint: adam_domain::VersionConstraint::parse("^1.0.0")
+                        .unwrap_or_else(|_| {
+                            adam_domain::VersionConstraint::Exact(adam_domain::SemVer::new(1, 0, 0))
+                        }),
+                    effective_version: adam_domain::SemVer::parse("1.0.0")
+                        .unwrap_or_else(|_| adam_domain::SemVer::new(0, 0, 0)),
+                    updated_by: "publisher".to_string(),
+                    effective_reason: adam_domain::EffectiveUpdateReason::Publish,
+                })
+                .with_constraint_str("1.0.0"),
+            )
             .await
             .unwrap();
         state

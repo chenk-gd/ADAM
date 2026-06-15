@@ -1,16 +1,17 @@
 //! Version constraint expressions
 
-use serde::{Deserialize, Serialize};
 use super::semver::SemVer;
+use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Version constraint expression
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VersionConstraint {
-    Exact(SemVer),           // =1.0.0
-    Caret(SemVer),          // ^1.0.0 -> >=1.0.0, <2.0.0
-    Tilde(SemVer),          // ~1.0.0 -> >=1.0.0, <1.1.0
+    Exact(SemVer), // =1.0.0
+    Caret(SemVer), // ^1.0.0 -> >=1.0.0, <2.0.0
+    Tilde(SemVer), // ~1.0.0 -> >=1.0.0, <1.1.0
     Range { min: Bound, max: Bound },
-    Wildcard,               // *
+    Wildcard, // *
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,12 +53,8 @@ impl VersionConstraint {
     pub fn matches(&self, version: &SemVer) -> bool {
         match self {
             Self::Exact(v) => version == v,
-            Self::Caret(v) => {
-                version >= v && version.major == v.major
-            }
-            Self::Tilde(v) => {
-                version >= v && version.major == v.major && version.minor == v.minor
-            }
+            Self::Caret(v) => version >= v && version.major == v.major,
+            Self::Tilde(v) => version >= v && version.major == v.major && version.minor == v.minor,
             Self::Range { min, max } => {
                 let min_satisfied = match min {
                     Bound::Inclusive(v) => version >= v,
@@ -73,24 +70,30 @@ impl VersionConstraint {
         }
     }
 
-    pub fn to_string(&self) -> String {
+    fn fmt_constraint(&self) -> String {
         match self {
-            Self::Exact(v) => format!("={}", v),
-            Self::Caret(v) => format!("^{}", v),
-            Self::Tilde(v) => format!("~{}", v),
+            Self::Exact(v) => format!("={v}"),
+            Self::Caret(v) => format!("^{v}"),
+            Self::Tilde(v) => format!("~{v}"),
             Self::Range { min, max } => {
                 let min_str = match min {
-                    Bound::Inclusive(v) => format!(">={}", v),
-                    Bound::Exclusive(v) => format!(">{}", v),
+                    Bound::Inclusive(v) => format!(">={v}"),
+                    Bound::Exclusive(v) => format!(">{v}"),
                 };
                 let max_str = match max {
-                    Bound::Inclusive(v) => format!(">={}", v),
-                    Bound::Exclusive(v) => format!(">{}", v),
+                    Bound::Inclusive(v) => format!(">={v}"),
+                    Bound::Exclusive(v) => format!(">{v}"),
                 };
-                format!("{}, {}", min_str, max_str)
+                format!("{min_str}, {max_str}")
             }
             Self::Wildcard => "*".to_string(),
         }
+    }
+}
+
+impl fmt::Display for VersionConstraint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.fmt_constraint())
     }
 }
 
@@ -147,9 +150,18 @@ mod tests {
 
     #[test]
     fn test_constraint_display() {
-        assert_eq!(VersionConstraint::parse("^1.0.0").unwrap().to_string(), "^1.0.0");
-        assert_eq!(VersionConstraint::parse("~1.0.0").unwrap().to_string(), "~1.0.0");
-        assert_eq!(VersionConstraint::parse("=1.0.0").unwrap().to_string(), "=1.0.0");
+        assert_eq!(
+            VersionConstraint::parse("^1.0.0").unwrap().to_string(),
+            "^1.0.0"
+        );
+        assert_eq!(
+            VersionConstraint::parse("~1.0.0").unwrap().to_string(),
+            "~1.0.0"
+        );
+        assert_eq!(
+            VersionConstraint::parse("=1.0.0").unwrap().to_string(),
+            "=1.0.0"
+        );
         assert_eq!(VersionConstraint::parse("*").unwrap().to_string(), "*");
     }
 

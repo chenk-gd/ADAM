@@ -65,6 +65,10 @@ ADAM 提供统一平台，实现以下功能：
 - `test_case` — 测试场景和用例
 - `pipeline` — CI/CD 流水线定义
 
+### 工作项子类型
+
+`work_item` 是统一工作承载资产。通过 `metadata.work_item_kind` 区分 feature、bugfix、test_execution 等工作类型。依赖关系通过 relationship 表达语义（implements、fixes、verifies 等），通过 propagation_policy 控制 Dirty 传播行为（dirty、context_only、audit_only）。
+
 ### 资产状态
 - **Clean** — 资产与上游依赖保持同步，内容可信
 - **Dirty** — 上游资产已发布新版本，等待审查确认

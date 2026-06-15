@@ -8,9 +8,8 @@
 //! - Major upgrade rollback
 
 use adam_domain::{
-    AssetInstance, AssetLevel, AssetRepository, AssetTypeId,
-    CreateAssetCommand, InMemoryAssetRepository,
-    OrganizationId, SemVer, UpgradePolicy, VersionConstraint,
+    AssetInstance, AssetLevel, AssetRepository, AssetTypeId, CreateAssetCommand,
+    InMemoryAssetRepository, OrganizationId, SemVer, UpgradePolicy, VersionConstraint,
 };
 
 /// Test helper for setting up test dependencies

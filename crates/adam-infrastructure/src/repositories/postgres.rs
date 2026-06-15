@@ -1,5 +1,6 @@
 //! PostgreSQL repository implementations
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -9,14 +10,15 @@ use uuid::Uuid;
 use adam_domain::asset::instance::AssetTypeId;
 use adam_domain::asset::state::AssetState;
 use adam_domain::dependency::boundary::AssetLevel;
-use adam_domain::version::VersionConstraint;
 use adam_domain::repository::UpgradePolicy;
 use adam_domain::repository::{TransactionContext, UnitOfWork};
+use adam_domain::version::VersionConstraint;
 use adam_domain::{
     AssetDependencyRecord, AssetId, AssetInstance, AssetRepository, AssetType, AssetTypeRepository,
-    CreateAssetCommand, DirtyResolutionLog, DirtyResolutionLogRepository, EffectiveUpdateReason,
-    OrganizationId, ProjectId, RepositoryError, SemVer, UpdateAssetCommand, VersionStrategy,
-    VirtualInstance, VirtualInstanceId, VirtualInstanceRepository,
+    CreateAssetCommand, DependencyRule, DependencyRuleId, DependencyRuleRepository,
+    DirtyResolutionLog, DirtyResolutionLogRepository, EffectiveUpdateReason, OrganizationId,
+    ProjectId, PropagationPolicy, RelationshipType, RepositoryError, SemVer, UpdateAssetCommand,
+    VersionStrategy, VirtualInstance, VirtualInstanceId, VirtualInstanceRepository,
 };
 
 /// PostgreSQL implementation of AssetRepository
@@ -27,6 +29,180 @@ pub struct PostgresAssetRepository {
 /// PostgreSQL implementation of AssetTypeRepository
 pub struct PostgresAssetTypeRepository {
     pool: PgPool,
+}
+
+/// PostgreSQL implementation of DependencyRuleRepository
+pub struct PostgresDependencyRuleRepository {
+    pool: PgPool,
+}
+
+impl PostgresDependencyRuleRepository {
+    /// Create a new PostgresDependencyRuleRepository with the given connection pool
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    fn row_to_dependency_rule(
+        &self,
+        row: &sqlx::postgres::PgRow,
+    ) -> Result<DependencyRule, RepositoryError> {
+        let relationship_str: String = row.get("relationship");
+        let relationship = RelationshipType::from_str(&relationship_str)
+            .map_err(|e| RepositoryError::ValidationError(format!("Invalid relationship: {e}")))?;
+        let propagation_policy_str: String =
+            row.try_get("propagation_policy").unwrap_or_else(|_| {
+                relationship
+                    .default_propagation_policy()
+                    .as_str()
+                    .to_string()
+            });
+        let propagation_policy =
+            PropagationPolicy::from_str(&propagation_policy_str).map_err(|e| {
+                RepositoryError::ValidationError(format!("Invalid propagation_policy: {e}"))
+            })?;
+
+        Ok(DependencyRule {
+            id: DependencyRuleId(row.get("id")),
+            source_type_id: AssetTypeId::from_uuid(row.get("source_type_id")),
+            target_type_id: AssetTypeId::from_uuid(row.get("target_type_id")),
+            relationship,
+            is_transitive: row.get("is_transitive"),
+            source_metadata_filter: row.try_get("source_metadata_filter").ok(),
+            target_metadata_filter: row.try_get("target_metadata_filter").ok(),
+            propagation_policy,
+            created_at: row.get("created_at"),
+        })
+    }
+}
+
+#[async_trait]
+impl DependencyRuleRepository for PostgresDependencyRuleRepository {
+    async fn create(&self, rule: &DependencyRule) -> Result<(), RepositoryError> {
+        sqlx::query(
+            r#"
+            INSERT INTO dependency_rules (
+                id, organization_id, source_type_id, target_type_id, relationship,
+                is_transitive, source_metadata_filter, target_metadata_filter,
+                propagation_policy, created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+        )
+        .bind(rule.id.0)
+        .bind(Uuid::nil())
+        .bind(rule.source_type_id.0)
+        .bind(rule.target_type_id.0)
+        .bind(rule.relationship.as_str())
+        .bind(rule.is_transitive)
+        .bind(&rule.source_metadata_filter)
+        .bind(&rule.target_metadata_filter)
+        .bind(rule.propagation_policy.as_str())
+        .bind(rule.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn find_by_source_type(
+        &self,
+        type_id: &AssetTypeId,
+    ) -> Result<Vec<DependencyRule>, RepositoryError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, source_type_id, target_type_id, relationship, is_transitive,
+                source_metadata_filter, target_metadata_filter, propagation_policy, created_at
+            FROM dependency_rules
+            WHERE source_type_id = $1
+            "#,
+        )
+        .bind(type_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        rows.iter()
+            .map(|row| self.row_to_dependency_rule(row))
+            .collect()
+    }
+
+    async fn find_by_target_type(
+        &self,
+        type_id: &AssetTypeId,
+    ) -> Result<Vec<DependencyRule>, RepositoryError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, source_type_id, target_type_id, relationship, is_transitive,
+                source_metadata_filter, target_metadata_filter, propagation_policy, created_at
+            FROM dependency_rules
+            WHERE target_type_id = $1
+            "#,
+        )
+        .bind(type_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        rows.iter()
+            .map(|row| self.row_to_dependency_rule(row))
+            .collect()
+    }
+
+    async fn delete(&self, rule_id: &DependencyRuleId) -> Result<(), RepositoryError> {
+        sqlx::query("DELETE FROM dependency_rules WHERE id = $1")
+            .bind(rule_id.0)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn find_allowed_type_rules(
+        &self,
+        source_type: &AssetTypeId,
+        target_type: &AssetTypeId,
+    ) -> Result<Vec<DependencyRule>, RepositoryError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, source_type_id, target_type_id, relationship, is_transitive,
+                source_metadata_filter, target_metadata_filter, propagation_policy, created_at
+            FROM dependency_rules
+            WHERE source_type_id = $1 AND target_type_id = $2
+            "#,
+        )
+        .bind(source_type.0)
+        .bind(target_type.0)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        rows.iter()
+            .map(|row| self.row_to_dependency_rule(row))
+            .collect()
+    }
+
+    async fn find_matching_rules(
+        &self,
+        source_type: &AssetTypeId,
+        source_metadata: &serde_json::Value,
+        target_type: &AssetTypeId,
+        target_metadata: &serde_json::Value,
+    ) -> Result<Vec<DependencyRule>, RepositoryError> {
+        let rules = self
+            .find_allowed_type_rules(source_type, target_type)
+            .await?;
+        Ok(rules
+            .into_iter()
+            .filter(|rule| {
+                rule.matches_with_metadata(
+                    source_type,
+                    source_metadata,
+                    target_type,
+                    target_metadata,
+                )
+            })
+            .collect())
+    }
 }
 
 impl PostgresAssetTypeRepository {
@@ -236,7 +412,7 @@ impl AssetRepository for PostgresAssetRepository {
                     vec![],
                     None,
                     SemVer::new(0, 0, 0), // Default version
-                    1,                     // Initial lock version
+                    1,                    // Initial lock version
                     now,
                     now,
                     cmd.idempotency_key.clone(),
@@ -385,7 +561,8 @@ impl AssetRepository for PostgresAssetRepository {
 
         match result {
             Some(row) => {
-                let new_lock_version: i64 = row.try_get("lock_version")
+                let new_lock_version: i64 = row
+                    .try_get("lock_version")
                     .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
                 Ok(new_lock_version)
             }
@@ -400,7 +577,8 @@ impl AssetRepository for PostgresAssetRepository {
 
                 match exists {
                     Some(row) => {
-                        let actual: i64 = row.try_get("lock_version")
+                        let actual: i64 = row
+                            .try_get("lock_version")
                             .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
                         Err(RepositoryError::ConcurrentModification {
                             expected: expected_lock_version,
@@ -813,8 +991,8 @@ impl PostgresDependencyRepository {
     ) -> Result<AssetDependencyRecord, RepositoryError> {
         let reason: String = row.get("effective_reason");
         let effective_reason = match reason.as_str() {
-            "publish" => EffectiveUpdateReason::Publish,
-            "manual_clean" => EffectiveUpdateReason::ManualClean,
+            "Publish" | "publish" => EffectiveUpdateReason::Publish,
+            "ManualClean" | "manual_clean" => EffectiveUpdateReason::ManualClean,
             other => {
                 return Err(RepositoryError::DatabaseError(format!(
                     "Unknown effective_reason: {other}"
@@ -822,30 +1000,45 @@ impl PostgresDependencyRepository {
             }
         };
 
-        let declared_version_str: String = row.get("declared_version");
-        let declared_constraint = VersionConstraint::parse(&declared_version_str)
+        let constraint_str: String = row.get("constraint_str");
+        let declared_constraint = VersionConstraint::parse(&constraint_str)
             .map_err(|e| RepositoryError::ValidationError(format!("Invalid constraint: {e}")))?;
-        let effective_version_str: String = row.get("effective_version");
-        let effective_version = SemVer::parse(&effective_version_str)
-            .map_err(|e| RepositoryError::ValidationError(format!("Invalid version: {e}")))?;
+        let effective_version = SemVer::new(
+            row.get::<i32, _>("effective_version_major") as u64,
+            row.get::<i32, _>("effective_version_minor") as u64,
+            row.get::<i32, _>("effective_version_patch") as u64,
+        );
         let upgrade_policy_str: String = row.get("upgrade_policy");
         let upgrade_policy = match upgrade_policy_str.as_str() {
-            "auto_patch" => UpgradePolicy::AutoPatch,
-            "auto_minor" => UpgradePolicy::AutoMinor,
-            "notify" => UpgradePolicy::Notify,
-            "manual" => UpgradePolicy::Manual,
-            "pin" => UpgradePolicy::Pin,
+            "AutoPatch" | "auto_patch" => UpgradePolicy::AutoPatch,
+            "AutoMinor" | "auto_minor" => UpgradePolicy::AutoMinor,
+            "Notify" | "notify" => UpgradePolicy::Notify,
+            "Manual" | "manual" => UpgradePolicy::Manual,
+            "Pin" | "pin" => UpgradePolicy::Pin,
             _ => UpgradePolicy::default(),
         };
         let lock_version: i64 = row.try_get::<i64, _>("lock_version").unwrap_or(1);
+
+        let relationship_str: String = row.get("relationship");
+        let relationship = adam_domain::RelationshipType::from_str(&relationship_str)
+            .map_err(|e| RepositoryError::ValidationError(format!("Invalid relationship: {e}")))?;
+
+        let propagation_policy_str: String = row
+            .try_get("propagation_policy")
+            .unwrap_or_else(|_| "dirty".to_string());
+        let propagation_policy = adam_domain::PropagationPolicy::from_str(&propagation_policy_str)
+            .map_err(|e| {
+                RepositoryError::ValidationError(format!("Invalid propagation_policy: {e}"))
+            })?;
 
         Ok(AssetDependencyRecord {
             id: row.get("id"),
             source_id: AssetId::from_uuid(row.get("source_id")),
             target_id: AssetId::from_uuid(row.get("target_id")),
-            relationship: row.get("relationship"),
+            relationship,
+            propagation_policy,
             declared_constraint,
-            constraint_str: declared_version_str,
+            constraint_str,
             effective_version,
             effective_updated_by: row.get("effective_updated_by"),
             effective_updated_at: row.get("effective_updated_at"),
@@ -905,12 +1098,15 @@ impl adam_domain::DependencyRepository for PostgresDependencyRepository {
         sqlx::query(
             r#"
             INSERT INTO asset_dependencies (
-                id, source_id, target_id, declared_version, effective_version,
-                effective_updated_by, effective_updated_at, effective_reason, created_at
+                id, source_id, target_id, relationship, propagation_policy,
+                declared_constraint, constraint_str,
+                effective_version_major, effective_version_minor, effective_version_patch,
+                upgrade_policy, effective_updated_by, effective_updated_at,
+                effective_reason, created_at
             )
             VALUES (
-                gen_random_uuid(), $1, $2, '0.0.0', '0.0.0',
-                'system', NOW(), 'publish', NOW()
+                gen_random_uuid(), $1, $2, 'depends_on', 'dirty',
+                '*', '*', 0, 0, 0, 'notify', 'system', NOW(), 'publish', NOW()
             )
             "#,
         )
@@ -940,16 +1136,23 @@ impl adam_domain::DependencyRepository for PostgresDependencyRepository {
         sqlx::query(
             r#"
             INSERT INTO asset_dependencies (
-                id, source_id, target_id, relationship, declared_version,
-                effective_version, effective_updated_by, effective_updated_at,
+                id, source_id, target_id, relationship, propagation_policy,
+                declared_constraint, constraint_str,
+                effective_version_major, effective_version_minor, effective_version_patch,
+                upgrade_policy, effective_updated_by, effective_updated_at,
                 effective_reason, created_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             ON CONFLICT (source_id, target_id)
             DO UPDATE SET
                 relationship = EXCLUDED.relationship,
-                declared_version = EXCLUDED.declared_version,
-                effective_version = EXCLUDED.effective_version,
+                propagation_policy = EXCLUDED.propagation_policy,
+                declared_constraint = EXCLUDED.declared_constraint,
+                constraint_str = EXCLUDED.constraint_str,
+                effective_version_major = EXCLUDED.effective_version_major,
+                effective_version_minor = EXCLUDED.effective_version_minor,
+                effective_version_patch = EXCLUDED.effective_version_patch,
+                upgrade_policy = EXCLUDED.upgrade_policy,
                 effective_updated_by = EXCLUDED.effective_updated_by,
                 effective_updated_at = EXCLUDED.effective_updated_at,
                 effective_reason = EXCLUDED.effective_reason
@@ -958,9 +1161,14 @@ impl adam_domain::DependencyRepository for PostgresDependencyRepository {
         .bind(record.id)
         .bind(record.source_id.0)
         .bind(record.target_id.0)
-        .bind(&record.relationship)
+        .bind(record.relationship.as_str())
+        .bind(record.propagation_policy.as_str())
+        .bind(record.declared_constraint.to_string())
         .bind(&record.constraint_str)
-        .bind(record.effective_version.to_string())
+        .bind(record.effective_version.major as i32)
+        .bind(record.effective_version.minor as i32)
+        .bind(record.effective_version.patch as i32)
+        .bind(record.upgrade_policy.as_str())
         .bind(&record.effective_updated_by)
         .bind(record.effective_updated_at)
         .bind(record.effective_reason.as_str())
@@ -979,9 +1187,11 @@ impl adam_domain::DependencyRepository for PostgresDependencyRepository {
         let rows = sqlx::query(
             r#"
             SELECT
-                id, source_id, target_id, relationship, declared_version,
-                effective_version, effective_updated_by, effective_updated_at,
-                effective_reason, created_at
+                id, source_id, target_id, relationship, propagation_policy,
+                declared_constraint, constraint_str,
+                effective_version_major, effective_version_minor, effective_version_patch,
+                upgrade_policy, effective_updated_by, effective_updated_at,
+                effective_reason, lock_version, created_at
             FROM asset_dependencies
             WHERE target_id = $1
             ORDER BY created_at DESC
@@ -1004,9 +1214,11 @@ impl adam_domain::DependencyRepository for PostgresDependencyRepository {
         let rows = sqlx::query(
             r#"
             SELECT
-                id, source_id, target_id, relationship, declared_version,
-                effective_version, effective_updated_by, effective_updated_at,
-                effective_reason, created_at
+                id, source_id, target_id, relationship, propagation_policy,
+                declared_constraint, constraint_str,
+                effective_version_major, effective_version_minor, effective_version_patch,
+                upgrade_policy, effective_updated_by, effective_updated_at,
+                effective_reason, lock_version, created_at
             FROM asset_dependencies
             WHERE source_id = $1
             ORDER BY created_at DESC
@@ -1030,18 +1242,24 @@ impl adam_domain::DependencyRepository for PostgresDependencyRepository {
         updated_by: String,
         reason: EffectiveUpdateReason,
     ) -> Result<(), RepositoryError> {
+        let effective_version = SemVer::parse(&effective_version)
+            .map_err(|e| RepositoryError::ValidationError(format!("Invalid version: {e}")))?;
         let result = sqlx::query(
             r#"
             UPDATE asset_dependencies
             SET
-                effective_version = $1,
-                effective_updated_by = $2,
+                effective_version_major = $1,
+                effective_version_minor = $2,
+                effective_version_patch = $3,
+                effective_updated_by = $4,
                 effective_updated_at = NOW(),
-                effective_reason = $3
-            WHERE source_id = $4 AND target_id = $5
+                effective_reason = $5
+            WHERE source_id = $6 AND target_id = $7
             "#,
         )
-        .bind(effective_version)
+        .bind(effective_version.major as i32)
+        .bind(effective_version.minor as i32)
+        .bind(effective_version.patch as i32)
         .bind(updated_by)
         .bind(reason.as_str())
         .bind(source_id.0)
@@ -1432,9 +1650,11 @@ impl PostgresUnitOfWork {
 impl UnitOfWork for PostgresUnitOfWork {
     async fn transaction<F, T, E>(&self, operation: F) -> Result<T, E>
     where
-        F: for<'a> FnOnce(&'a mut TransactionContext)
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, E>> + Send + 'a>>
-            + Send
+        F: for<'a> FnOnce(
+                &'a mut TransactionContext,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<T, E>> + Send + 'a>,
+            > + Send
             + 'async_trait,
         E: From<RepositoryError> + Send,
         T: Send,

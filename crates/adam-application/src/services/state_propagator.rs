@@ -34,8 +34,8 @@
 
 use adam_domain::{
     AssetDependencyRecord, AssetId, AssetRepository, AssetState, DependencyRepository,
-    DirtyQueueEntry, DirtyQueueRepository, RepositoryError, SemVer, UpgradePolicy,
-    VersionConstraint,
+    DirtyQueueEntry, DirtyQueueRepository, PropagationPolicy, RelationshipType, RepositoryError,
+    SemVer, UpgradePolicy, VersionConstraint,
 };
 
 /// Error types for state propagation
@@ -128,9 +128,7 @@ impl StatePropagator {
             }
             UpgradePolicy::AutoMinor => {
                 // Auto-update if major is same
-                if new_version.major == effective_version.major
-                    && new_version > effective_version
-                {
+                if new_version.major == effective_version.major && new_version > effective_version {
                     Some(new_version.clone())
                 } else {
                     None
@@ -172,50 +170,49 @@ impl StatePropagator {
         dirty_repo: &dyn DirtyQueueRepository,
     ) -> Result<PropagationResult, StatePropagationError> {
         // Parse the new version
-        let new_semver = SemVer::parse(new_version)
-            .map_err(|e| StatePropagationError::InvalidVersion(e))?;
+        let new_semver =
+            SemVer::parse(new_version).map_err(StatePropagationError::InvalidVersion)?;
 
         // Check if the published asset is archived
         let asset = asset_repo
             .find_by_id(asset_id)
             .await?
-            .ok_or_else(|| RepositoryError::NotFound(format!("{:?}", asset_id)))?;
+            .ok_or_else(|| RepositoryError::NotFound(format!("{asset_id:?}")))?;
 
         if asset.is_archived() {
             return Err(StatePropagationError::ArchivedAssetCannotTrigger);
         }
 
         // Get rich dependency records with constraint information
-        let dependencies: Vec<AssetDependencyRecord> = match dependency_repo
-            .find_downstream_dependencies(asset_id)
-            .await
-        {
-            Ok(records) => records,
-            Err(_) => {
-                // Fallback: try simple downstream lookup without constraint info
-                // In this case, we can't do constraint checking
-                let downstream_ids = dependency_repo.find_downstream(asset_id).await?;
-                // Create minimal dependency records without constraint info
-                downstream_ids
-                    .into_iter()
-                    .map(|id| AssetDependencyRecord {
-                        id: uuid::Uuid::new_v4(),
-                        source_id: id,
-                        target_id: *asset_id,
-                        relationship: "depends_on".to_string(),
-                        declared_constraint: VersionConstraint::Wildcard,
-                        constraint_str: "*".to_string(),
-                        effective_version: SemVer::new(0, 0, 0),
-                        effective_updated_by: "system".to_string(),
-                        effective_updated_at: chrono::Utc::now(),
-                        effective_reason: adam_domain::EffectiveUpdateReason::Publish,
-                        upgrade_policy: adam_domain::UpgradePolicy::Notify,
-                        lock_version: 1,
-                        created_at: chrono::Utc::now(),
-                    })
-                    .collect()
-            }
-        };
+        let dependencies: Vec<AssetDependencyRecord> =
+            match dependency_repo.find_downstream_dependencies(asset_id).await {
+                Ok(records) => records,
+                Err(_) => {
+                    // Fallback: try simple downstream lookup without constraint info
+                    // In this case, we can't do constraint checking
+                    let downstream_ids = dependency_repo.find_downstream(asset_id).await?;
+                    // Create minimal dependency records without constraint info
+                    downstream_ids
+                        .into_iter()
+                        .map(|id| {
+                            AssetDependencyRecord::new(adam_domain::NewDependencyRecord {
+                                source_id: id,
+                                target_id: *asset_id,
+                                relationship: RelationshipType::DependsOn,
+                                declared_constraint: VersionConstraint::Wildcard,
+                                effective_version: SemVer::new(0, 0, 0),
+                                updated_by: "system".to_string(),
+                                effective_reason: adam_domain::EffectiveUpdateReason::Publish,
+                            })
+                            // The simple fallback represents legacy depends_on edges.
+                            // Those should continue to dirty downstream assets.
+                            .with_propagation_policy(PropagationPolicy::Dirty)
+                            .with_constraint_str("*")
+                            .with_upgrade_policy(UpgradePolicy::Notify)
+                        })
+                        .collect()
+                }
+            };
 
         let mut affected = Vec::new();
         let mut auto_updated = 0;
@@ -223,6 +220,12 @@ impl StatePropagator {
         let mut skipped = 0;
 
         for dependency in dependencies {
+            // Skip dependencies whose propagation policy is not Dirty
+            if !dependency.propagation_policy.triggers_dirty() {
+                skipped += 1;
+                continue;
+            }
+
             // Check if new version satisfies the declared constraint
             if !Self::version_matches_constraint(&new_semver, &dependency.declared_constraint) {
                 // New version doesn't match constraint - skip this dependency
@@ -233,10 +236,9 @@ impl StatePropagator {
             let downstream_id = dependency.source_id;
 
             // Fetch downstream asset - must exist
-            let downstream_asset = asset_repo
-                .find_by_id(&downstream_id)
-                .await?
-                .ok_or(StatePropagationError::DownstreamAssetNotFound(downstream_id))?;
+            let downstream_asset = asset_repo.find_by_id(&downstream_id).await?.ok_or(
+                StatePropagationError::DownstreamAssetNotFound(downstream_id),
+            )?;
 
             // Skip archived downstream assets
             if downstream_asset.is_archived() {
@@ -249,7 +251,7 @@ impl StatePropagator {
                 &dependency.effective_version,
                 &new_semver,
             ) {
-                Some(updated_version) => {
+                Some(_updated_version) => {
                     // Auto-update effective version
                     // Note: In a full implementation, this would update the dependency record
                     // For now, we track it in the result
@@ -527,22 +529,23 @@ mod tests {
         );
 
         let dependency_repo = InMemoryDependencyRepository::new();
+        let declared_constraint = VersionConstraint::parse("^1.0.0")
+            .unwrap_or_else(|_| VersionConstraint::Exact(SemVer::new(1, 0, 0)));
+        let effective_version = SemVer::parse("1.0.3").unwrap_or_else(|_| SemVer::new(1, 0, 3));
+
+        let record = AssetDependencyRecord::new(adam_domain::NewDependencyRecord {
+            source_id: asset_b.id,
+            target_id: asset_a.id,
+            relationship: RelationshipType::DependsOn,
+            declared_constraint,
+            effective_version,
+            updated_by: "reviewer".to_string(),
+            effective_reason: EffectiveUpdateReason::ManualClean,
+        })
+        .with_constraint_str("^1.0.0");
+
         dependency_repo
-            .create_dependency_record(&AssetDependencyRecord {
-                id: uuid::Uuid::new_v4(),
-                source_id: asset_b.id,
-                target_id: asset_a.id,
-                relationship: "depends_on".to_string(),
-                declared_constraint: VersionConstraint::parse("^1.0.0").unwrap_or_else(|_| VersionConstraint::Exact(SemVer::new(1, 0, 0))),
-                constraint_str: "^1.0.0".to_string(),
-                effective_version: SemVer::parse("1.0.3").unwrap_or_else(|_| SemVer::new(1, 0, 3)),
-                effective_updated_by: "reviewer".to_string(),
-                effective_updated_at: chrono::Utc::now(),
-                effective_reason: EffectiveUpdateReason::ManualClean,
-                created_at: chrono::Utc::now(),
-                upgrade_policy: adam_domain::UpgradePolicy::default(),
-                lock_version: 1,
-            })
+            .create_dependency_record(&record)
             .await
             .unwrap();
 
@@ -747,5 +750,138 @@ mod tests {
         // Verify no dirty entries were created
         let entries = dirty_repo.find_all_unresolved().await.unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn context_only_dependency_does_not_mark_downstream_dirty() {
+        let org_id = OrganizationId::new();
+        let type_id = AssetTypeId::new();
+
+        let upstream = AssetInstance::new_organization_level(
+            "Failed Test Report",
+            type_id,
+            org_id,
+            "https://example.com/report",
+            "manual",
+            serde_json::json!({"status": "failed"}),
+            SemVer::new(1, 0, 0),
+        );
+        let bugfix = AssetInstance::new_organization_level(
+            "Fix login failure",
+            type_id,
+            org_id,
+            "https://example.com/work/1",
+            "manual",
+            serde_json::json!({"work_item_kind": "bugfix"}),
+            SemVer::new(1, 0, 0),
+        );
+
+        let asset_repo = InMemoryAssetRepository::with_data(vec![upstream.clone(), bugfix.clone()]);
+        let dependency_repo = InMemoryDependencyRepository::new();
+        dependency_repo
+            .create_dependency_record(
+                &AssetDependencyRecord::new(adam_domain::NewDependencyRecord {
+                    source_id: bugfix.id,
+                    target_id: upstream.id,
+                    relationship: RelationshipType::References,
+                    declared_constraint: VersionConstraint::Wildcard,
+                    effective_version: SemVer::new(1, 0, 0),
+                    updated_by: "publisher".to_string(),
+                    effective_reason: EffectiveUpdateReason::Publish,
+                })
+                .with_propagation_policy(adam_domain::PropagationPolicy::ContextOnly)
+                .with_constraint_str("*"),
+            )
+            .await
+            .unwrap();
+
+        let dirty_repo = InMemoryDirtyQueueRepository::new();
+        let propagator = StatePropagator::new();
+
+        let result = propagator
+            .on_asset_published(
+                &upstream.id,
+                "1.1.0",
+                &asset_repo,
+                &dependency_repo,
+                &dirty_repo,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.marked_dirty_count, 0);
+        assert_eq!(result.skipped_count, 1);
+
+        let updated_bugfix = asset_repo.find_by_id(&bugfix.id).await.unwrap().unwrap();
+        assert_eq!(updated_bugfix.state(), AssetState::Clean);
+        assert!(
+            dirty_repo
+                .find_unresolved_by_asset(&bugfix.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_only_dependency_does_not_mark_downstream_dirty() {
+        let org_id = OrganizationId::new();
+        let type_id = AssetTypeId::new();
+
+        let upstream = AssetInstance::new_organization_level(
+            "Code Commit",
+            type_id,
+            org_id,
+            "https://example.com/commit",
+            "git",
+            serde_json::json!({}),
+            SemVer::new(1, 0, 0),
+        );
+        let release = AssetInstance::new_organization_level(
+            "Release Task",
+            type_id,
+            org_id,
+            "https://example.com/release/1",
+            "manual",
+            serde_json::json!({"work_item_kind": "release"}),
+            SemVer::new(1, 0, 0),
+        );
+
+        let asset_repo =
+            InMemoryAssetRepository::with_data(vec![upstream.clone(), release.clone()]);
+        let dependency_repo = InMemoryDependencyRepository::new();
+        dependency_repo
+            .create_dependency_record(
+                &AssetDependencyRecord::new(adam_domain::NewDependencyRecord {
+                    source_id: release.id,
+                    target_id: upstream.id,
+                    relationship: RelationshipType::DependsOn,
+                    declared_constraint: VersionConstraint::Wildcard,
+                    effective_version: SemVer::new(1, 0, 0),
+                    updated_by: "publisher".to_string(),
+                    effective_reason: EffectiveUpdateReason::Publish,
+                })
+                .with_propagation_policy(adam_domain::PropagationPolicy::AuditOnly)
+                .with_constraint_str("*"),
+            )
+            .await
+            .unwrap();
+
+        let dirty_repo = InMemoryDirtyQueueRepository::new();
+        let propagator = StatePropagator::new();
+
+        let result = propagator
+            .on_asset_published(
+                &upstream.id,
+                "1.1.0",
+                &asset_repo,
+                &dependency_repo,
+                &dirty_repo,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.marked_dirty_count, 0);
+        assert_eq!(result.skipped_count, 1);
     }
 }

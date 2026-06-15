@@ -211,24 +211,19 @@ impl EffectiveUpdateReason {
 }
 
 /// Upgrade policy for dependency updates
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum UpgradePolicy {
     /// Automatically update patch versions
     AutoPatch,
     /// Automatically update minor versions
     AutoMinor,
     /// Notify but don't auto-update
+    #[default]
     Notify,
     /// Manual review required
     Manual,
     /// Pin to specific version
     Pin,
-}
-
-impl Default for UpgradePolicy {
-    fn default() -> Self {
-        UpgradePolicy::Notify
-    }
 }
 
 impl UpgradePolicy {
@@ -250,16 +245,72 @@ pub struct AssetDependencyRecord {
     pub id: uuid::Uuid,
     pub source_id: AssetId,
     pub target_id: AssetId,
-    pub relationship: String,
-    pub declared_constraint: crate::version::VersionConstraint,  // CHANGED: from String
-    pub constraint_str: String,                                   // NEW: for DB storage
-    pub effective_version: crate::version::SemVer,              // CHANGED: from String
+    pub relationship: crate::dependency::RelationshipType,
+    pub propagation_policy: crate::dependency::PropagationPolicy,
+    pub declared_constraint: crate::version::VersionConstraint,
+    pub constraint_str: String,
+    pub effective_version: crate::version::SemVer,
     pub effective_updated_by: String,
     pub effective_updated_at: chrono::DateTime<chrono::Utc>,
     pub effective_reason: EffectiveUpdateReason,
-    pub upgrade_policy: UpgradePolicy,                          // NEW
-    pub lock_version: i64,                                      // NEW: for optimistic locking
+    pub upgrade_policy: UpgradePolicy,
+    pub lock_version: i64,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Parameters for creating a new dependency record.
+pub struct NewDependencyRecord {
+    pub source_id: AssetId,
+    pub target_id: AssetId,
+    pub relationship: crate::dependency::RelationshipType,
+    pub declared_constraint: crate::version::VersionConstraint,
+    pub effective_version: crate::version::SemVer,
+    pub updated_by: String,
+    pub effective_reason: EffectiveUpdateReason,
+}
+
+impl AssetDependencyRecord {
+    /// Create a new dependency record with sensible defaults.
+    ///
+    /// `propagation_policy` defaults from `relationship.default_propagation_policy()`.
+    /// Use `with_propagation_policy()` to override.
+    pub fn new(params: NewDependencyRecord) -> Self {
+        let now = chrono::Utc::now();
+        Self {
+            id: uuid::Uuid::new_v4(),
+            source_id: params.source_id,
+            target_id: params.target_id,
+            relationship: params.relationship,
+            propagation_policy: params.relationship.default_propagation_policy(),
+            declared_constraint: params.declared_constraint,
+            constraint_str: String::new(),
+            effective_version: params.effective_version,
+            effective_updated_by: params.updated_by,
+            effective_updated_at: now,
+            effective_reason: params.effective_reason,
+            upgrade_policy: UpgradePolicy::default(),
+            lock_version: 1,
+            created_at: now,
+        }
+    }
+
+    /// Builder: override propagation policy.
+    pub fn with_propagation_policy(mut self, policy: crate::dependency::PropagationPolicy) -> Self {
+        self.propagation_policy = policy;
+        self
+    }
+
+    /// Builder: override upgrade policy.
+    pub fn with_upgrade_policy(mut self, policy: UpgradePolicy) -> Self {
+        self.upgrade_policy = policy;
+        self
+    }
+
+    /// Builder: set constraint string for DB storage.
+    pub fn with_constraint_str(mut self, s: impl Into<String>) -> Self {
+        self.constraint_str = s.into();
+        self
+    }
 }
 
 /// Entry in the dirty queue for tracking upstream changes
@@ -530,9 +581,11 @@ pub trait UnitOfWork: Send + Sync {
     /// * `Err(E)` - Transaction rolled back, returns closure error
     async fn transaction<F, T, E>(&self, operation: F) -> Result<T, E>
     where
-        F: for<'a> FnOnce(&'a mut TransactionContext)
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, E>> + Send + 'a>>
-            + Send
+        F: for<'a> FnOnce(
+                &'a mut TransactionContext,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<T, E>> + Send + 'a>,
+            > + Send
             + 'async_trait,
         E: From<RepositoryError> + Send,
         T: Send;
@@ -596,8 +649,12 @@ impl TransactionContextBuilder {
     pub fn build(self) -> TransactionContext {
         TransactionContext {
             asset_repo: self.asset_repo.expect("Asset repository required"),
-            dependency_repo: self.dependency_repo.expect("Dependency repository required"),
-            dirty_queue_repo: self.dirty_queue_repo.expect("Dirty queue repository required"),
+            dependency_repo: self
+                .dependency_repo
+                .expect("Dependency repository required"),
+            dirty_queue_repo: self
+                .dirty_queue_repo
+                .expect("Dirty queue repository required"),
         }
     }
 }

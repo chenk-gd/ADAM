@@ -7,8 +7,8 @@ use adam_adapters::mcp::{AdamMcpServer, McpServerState};
 use adam_adapters::rest::{self, AppState};
 use adam_domain::{
     AssetRepository, AssetTypeRepository, AssetVersionRepository, AuthPrincipal,
-    DependencyRepository, DirtyQueueRepository, DirtyResolutionLogRepository, OrganizationId,
-    ProjectId, Role, VirtualInstanceRepository,
+    DependencyRepository, DependencyRuleRepository, DirtyQueueRepository,
+    DirtyResolutionLogRepository, OrganizationId, ProjectId, Role, VirtualInstanceRepository,
 };
 use sqlx::postgres::PgPoolOptions;
 
@@ -78,6 +78,7 @@ struct Repositories {
     asset_repo: Arc<dyn AssetRepository>,
     asset_type_repo: Arc<dyn AssetTypeRepository>,
     dependency_repo: Arc<dyn DependencyRepository>,
+    dependency_rule_repo: Arc<dyn DependencyRuleRepository>,
     dirty_repo: Arc<dyn DirtyQueueRepository>,
     version_repo: Arc<dyn AssetVersionRepository>,
     dirty_log_repo: Arc<dyn DirtyResolutionLogRepository>,
@@ -102,6 +103,7 @@ impl Repositories {
             asset_repo: Arc::new(adam_domain::InMemoryAssetRepository::new()),
             asset_type_repo: Arc::new(adam_domain::InMemoryAssetTypeRepository::new()),
             dependency_repo: Arc::new(adam_domain::InMemoryDependencyRepository::new()),
+            dependency_rule_repo: Arc::new(adam_domain::InMemoryDependencyRuleRepository::new()),
             dirty_repo: Arc::new(adam_domain::InMemoryDirtyQueueRepository::new()),
             version_repo: Arc::new(adam_domain::InMemoryAssetVersionRepository::new()),
             dirty_log_repo: Arc::new(adam_domain::InMemoryDirtyResolutionLogRepository::new()),
@@ -124,6 +126,11 @@ impl Repositories {
             ),
             dependency_repo: Arc::new(
                 adam_infrastructure::repositories::PostgresDependencyRepository::new(pool.clone()),
+            ),
+            dependency_rule_repo: Arc::new(
+                adam_infrastructure::repositories::PostgresDependencyRuleRepository::new(
+                    pool.clone(),
+                ),
             ),
             dirty_repo: Arc::new(
                 adam_infrastructure::repositories::PostgresDirtyQueueRepository::new(pool.clone()),
@@ -149,6 +156,7 @@ impl Repositories {
             asset_repo: self.asset_repo.clone(),
             asset_type_repo: self.asset_type_repo.clone(),
             dependency_repo: self.dependency_repo.clone(),
+            dependency_rule_repo: self.dependency_rule_repo.clone(),
             dirty_repo: self.dirty_repo.clone(),
             version_repo: self.version_repo.clone(),
             dirty_log_repo: self.dirty_log_repo.clone(),
@@ -159,6 +167,7 @@ impl Repositories {
         McpServerState {
             asset_repo: self.asset_repo.clone(),
             dependency_repo: self.dependency_repo.clone(),
+            dependency_rule_repo: self.dependency_rule_repo.clone(),
             dirty_repo: self.dirty_repo.clone(),
             version_repo: self.version_repo.clone(),
             dirty_log_repo: self.dirty_log_repo.clone(),

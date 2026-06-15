@@ -24,8 +24,8 @@ use adam_application::services::{
 use adam_domain::{
     AssetDependencyRecord, AssetId, AssetInstance, AssetRepository, AssetState, AssetTypeId,
     AssetTypeRepository, AssetVersion, AssetVersionRepository, AuthPrincipal, AuthorizationError,
-    CreateAssetCommand, DependencyRepository, DirtyQueueRepository, DirtyResolutionLogRepository,
-    OrganizationId, ProjectId, RepositoryError, Role,
+    CreateAssetCommand, DependencyRepository, DependencyRuleRepository, DirtyQueueRepository,
+    DirtyResolutionLogRepository, OrganizationId, ProjectId, RepositoryError, Role,
 };
 
 // ============================================================================
@@ -412,6 +412,9 @@ pub struct PublishRequest {
 pub struct PublishDependencyRequest {
     pub upstream_asset_id: Uuid,
     pub version: String,
+    pub relationship: Option<String>,
+    pub propagation_policy: Option<String>,
+    pub upgrade_policy: Option<String>,
 }
 
 /// Publish response
@@ -470,6 +473,7 @@ pub struct AssetDependencyResponse {
     pub source_id: Uuid,
     pub target_id: Uuid,
     pub relationship: String,
+    pub propagation_policy: String,
     pub constraint_str: String,
     pub effective_version: String,
     pub effective_updated_by: String,
@@ -483,7 +487,8 @@ impl From<AssetDependencyRecord> for AssetDependencyResponse {
             id: record.id,
             source_id: record.source_id.0,
             target_id: record.target_id.0,
-            relationship: record.relationship,
+            relationship: record.relationship.as_str().to_string(),
+            propagation_policy: record.propagation_policy.as_str().to_string(),
             constraint_str: record.constraint_str,
             effective_version: record.effective_version.to_string(),
             effective_updated_by: record.effective_updated_by,
@@ -570,6 +575,7 @@ pub struct AppState {
     pub asset_repo: Arc<dyn AssetRepository>,
     pub asset_type_repo: Arc<dyn AssetTypeRepository>,
     pub dependency_repo: Arc<dyn DependencyRepository>,
+    pub dependency_rule_repo: Arc<dyn DependencyRuleRepository>,
     pub dirty_repo: Arc<dyn DirtyQueueRepository>,
     pub version_repo: Arc<dyn AssetVersionRepository>,
     pub dirty_log_repo: Arc<dyn DirtyResolutionLogRepository>,
@@ -831,22 +837,52 @@ pub async fn publish_asset(
         state.dirty_log_repo.clone(),
     );
     let version = service
-        .publish(PublishAssetCommand {
-            asset_id,
-            version: req.version,
-            publisher: auth.principal.id,
-            release_notes: req.release_notes.unwrap_or_default(),
-            dependencies: req
-                .dependencies
-                .unwrap_or_default()
-                .into_iter()
-                .map(|dependency| PublishDependency {
-                    upstream_asset_id: AssetId::from_uuid(dependency.upstream_asset_id),
-                    version: dependency.version,
-                })
-                .collect(),
-            suggested_type: req.suggested_type,
-        })
+        .publish(
+            PublishAssetCommand {
+                asset_id,
+                version: req.version,
+                publisher: auth.principal.id,
+                release_notes: req.release_notes.unwrap_or_default(),
+                dependencies: req
+                    .dependencies
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|dependency| {
+                        use std::str::FromStr;
+                        let relationship = dependency
+                            .relationship
+                            .as_deref()
+                            .map(adam_domain::RelationshipType::from_str)
+                            .transpose()
+                            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+                        let propagation_policy = dependency
+                            .propagation_policy
+                            .as_deref()
+                            .map(adam_domain::PropagationPolicy::from_str)
+                            .transpose()
+                            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+                        let upgrade_policy =
+                            dependency.upgrade_policy.as_deref().and_then(|s| match s {
+                                "auto_patch" => Some(adam_domain::UpgradePolicy::AutoPatch),
+                                "auto_minor" => Some(adam_domain::UpgradePolicy::AutoMinor),
+                                "notify" => Some(adam_domain::UpgradePolicy::Notify),
+                                "manual" => Some(adam_domain::UpgradePolicy::Manual),
+                                "pin" => Some(adam_domain::UpgradePolicy::Pin),
+                                _ => None,
+                            });
+                        Ok(PublishDependency {
+                            upstream_asset_id: AssetId::from_uuid(dependency.upstream_asset_id),
+                            version: dependency.version,
+                            relationship,
+                            propagation_policy,
+                            upgrade_policy,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ApiError>>()?,
+                suggested_type: req.suggested_type,
+            },
+            state.dependency_rule_repo.as_ref(),
+        )
         .await
         .map_err(ApiError::from)?;
 
@@ -1371,6 +1407,7 @@ mod tests {
             asset_repo: Arc::new(adam_domain::InMemoryAssetRepository::new()),
             asset_type_repo: Arc::new(adam_domain::InMemoryAssetTypeRepository::new()),
             dependency_repo: Arc::new(adam_domain::InMemoryDependencyRepository::new()),
+            dependency_rule_repo: Arc::new(adam_domain::InMemoryDependencyRuleRepository::new()),
             dirty_repo: Arc::new(adam_domain::InMemoryDirtyQueueRepository::new()),
             version_repo: Arc::new(adam_domain::InMemoryAssetVersionRepository::new()),
             dirty_log_repo: Arc::new(adam_domain::InMemoryDirtyResolutionLogRepository::new()),
@@ -1729,21 +1766,22 @@ mod tests {
         let upstream_asset_id = AssetId::new();
         state
             .dependency_repo
-            .create_dependency_record(&adam_domain::AssetDependencyRecord {
-                id: uuid::Uuid::new_v4(),
-                source_id: created_asset.id,
-                target_id: upstream_asset_id,
-                relationship: "depends_on".to_string(),
-                constraint_str: "0.0.0".to_string(),
-                declared_constraint: adam_domain::VersionConstraint::parse("^0.0.0").unwrap_or_else(|_| adam_domain::VersionConstraint::Exact(adam_domain::SemVer::new(0, 0, 0))),
-                effective_version: adam_domain::SemVer::parse("0.0.0").unwrap_or_else(|_| adam_domain::SemVer::new(0, 0, 0)),
-                effective_updated_by: "publisher".to_string(),
-                effective_updated_at: chrono::Utc::now(),
-                effective_reason: adam_domain::EffectiveUpdateReason::Publish,
-                created_at: chrono::Utc::now(),
-                upgrade_policy: adam_domain::UpgradePolicy::default(),
-                lock_version: 1,
-            })
+            .create_dependency_record(
+                &adam_domain::AssetDependencyRecord::new(adam_domain::NewDependencyRecord {
+                    source_id: created_asset.id,
+                    target_id: upstream_asset_id,
+                    relationship: adam_domain::RelationshipType::DependsOn,
+                    declared_constraint: adam_domain::VersionConstraint::parse("^0.0.0")
+                        .unwrap_or_else(|_| {
+                            adam_domain::VersionConstraint::Exact(adam_domain::SemVer::new(0, 0, 0))
+                        }),
+                    effective_version: adam_domain::SemVer::parse("0.0.0")
+                        .unwrap_or_else(|_| adam_domain::SemVer::new(0, 0, 0)),
+                    updated_by: "publisher".to_string(),
+                    effective_reason: adam_domain::EffectiveUpdateReason::Publish,
+                })
+                .with_constraint_str("0.0.0"),
+            )
             .await
             .unwrap();
 
@@ -1906,21 +1944,22 @@ mod tests {
             .unwrap();
         state
             .dependency_repo
-            .create_dependency_record(&adam_domain::AssetDependencyRecord {
-                id: uuid::Uuid::new_v4(),
-                source_id: downstream.id,
-                target_id: upstream.id,
-                relationship: "depends_on".to_string(),
-                constraint_str: "1.0.0".to_string(),
-                declared_constraint: adam_domain::VersionConstraint::parse("^1.0.0").unwrap_or_else(|_| adam_domain::VersionConstraint::Exact(adam_domain::SemVer::new(1, 0, 0))),
-                effective_version: adam_domain::SemVer::parse("1.0.0").unwrap_or_else(|_| adam_domain::SemVer::new(0, 0, 0)),
-                effective_updated_by: "publisher".to_string(),
-                effective_updated_at: chrono::Utc::now(),
-                effective_reason: adam_domain::EffectiveUpdateReason::Publish,
-                created_at: chrono::Utc::now(),
-                upgrade_policy: adam_domain::UpgradePolicy::default(),
-                lock_version: 1,
-            })
+            .create_dependency_record(
+                &adam_domain::AssetDependencyRecord::new(adam_domain::NewDependencyRecord {
+                    source_id: downstream.id,
+                    target_id: upstream.id,
+                    relationship: adam_domain::RelationshipType::DependsOn,
+                    declared_constraint: adam_domain::VersionConstraint::parse("^1.0.0")
+                        .unwrap_or_else(|_| {
+                            adam_domain::VersionConstraint::Exact(adam_domain::SemVer::new(1, 0, 0))
+                        }),
+                    effective_version: adam_domain::SemVer::parse("1.0.0")
+                        .unwrap_or_else(|_| adam_domain::SemVer::new(0, 0, 0)),
+                    updated_by: "publisher".to_string(),
+                    effective_reason: adam_domain::EffectiveUpdateReason::Publish,
+                })
+                .with_constraint_str("1.0.0"),
+            )
             .await
             .unwrap();
 
@@ -1994,21 +2033,24 @@ mod tests {
         for (source_id, target_id) in [(asset.id, upstream_id), (downstream.id, asset.id)] {
             state
                 .dependency_repo
-                .create_dependency_record(&adam_domain::AssetDependencyRecord {
-                    id: uuid::Uuid::new_v4(),
-                    source_id,
-                    target_id,
-                    relationship: "depends_on".to_string(),
-                    constraint_str: "1.0.0".to_string(),
-                    declared_constraint: adam_domain::VersionConstraint::parse("^1.0.0").unwrap_or_else(|_| adam_domain::VersionConstraint::Exact(adam_domain::SemVer::new(1, 0, 0))),
-                    effective_version: adam_domain::SemVer::parse("1.0.0").unwrap_or_else(|_| adam_domain::SemVer::new(0, 0, 0)),
-                    effective_updated_by: "publisher".to_string(),
-                    effective_updated_at: chrono::Utc::now(),
-                    effective_reason: adam_domain::EffectiveUpdateReason::Publish,
-                    created_at: chrono::Utc::now(),
-                    upgrade_policy: adam_domain::UpgradePolicy::default(),
-                    lock_version: 1,
-                })
+                .create_dependency_record(
+                    &adam_domain::AssetDependencyRecord::new(adam_domain::NewDependencyRecord {
+                        source_id,
+                        target_id,
+                        relationship: adam_domain::RelationshipType::DependsOn,
+                        declared_constraint: adam_domain::VersionConstraint::parse("^1.0.0")
+                            .unwrap_or_else(|_| {
+                                adam_domain::VersionConstraint::Exact(adam_domain::SemVer::new(
+                                    1, 0, 0,
+                                ))
+                            }),
+                        effective_version: adam_domain::SemVer::parse("1.0.0")
+                            .unwrap_or_else(|_| adam_domain::SemVer::new(0, 0, 0)),
+                        updated_by: "publisher".to_string(),
+                        effective_reason: adam_domain::EffectiveUpdateReason::Publish,
+                    })
+                    .with_constraint_str("1.0.0"),
+                )
                 .await
                 .unwrap();
         }
@@ -2094,21 +2136,24 @@ mod tests {
         for (source_id, target_id) in [(asset.id, upstream), (downstream, asset.id)] {
             state
                 .dependency_repo
-                .create_dependency_record(&adam_domain::AssetDependencyRecord {
-                    id: uuid::Uuid::new_v4(),
-                    source_id,
-                    target_id,
-                    relationship: "depends_on".to_string(),
-                    constraint_str: "1.0.0".to_string(),
-                    declared_constraint: adam_domain::VersionConstraint::parse("^1.0.0").unwrap_or_else(|_| adam_domain::VersionConstraint::Exact(adam_domain::SemVer::new(1, 0, 0))),
-                    effective_version: adam_domain::SemVer::parse("1.0.0").unwrap_or_else(|_| adam_domain::SemVer::new(0, 0, 0)),
-                    effective_updated_by: "publisher".to_string(),
-                    effective_updated_at: chrono::Utc::now(),
-                    effective_reason: adam_domain::EffectiveUpdateReason::Publish,
-                    created_at: chrono::Utc::now(),
-                    upgrade_policy: adam_domain::UpgradePolicy::default(),
-                    lock_version: 1,
-                })
+                .create_dependency_record(
+                    &adam_domain::AssetDependencyRecord::new(adam_domain::NewDependencyRecord {
+                        source_id,
+                        target_id,
+                        relationship: adam_domain::RelationshipType::DependsOn,
+                        declared_constraint: adam_domain::VersionConstraint::parse("^1.0.0")
+                            .unwrap_or_else(|_| {
+                                adam_domain::VersionConstraint::Exact(adam_domain::SemVer::new(
+                                    1, 0, 0,
+                                ))
+                            }),
+                        effective_version: adam_domain::SemVer::parse("1.0.0")
+                            .unwrap_or_else(|_| adam_domain::SemVer::new(0, 0, 0)),
+                        updated_by: "publisher".to_string(),
+                        effective_reason: adam_domain::EffectiveUpdateReason::Publish,
+                    })
+                    .with_constraint_str("1.0.0"),
+                )
                 .await
                 .unwrap();
         }

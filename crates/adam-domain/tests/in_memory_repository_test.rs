@@ -1,16 +1,17 @@
 //! Integration tests for in-memory repositories
 
 use adam_domain::asset::state::AssetState;
+use adam_domain::repository::UpgradePolicy;
 use adam_domain::repository::{
     AssetDependencyRecord, AssetRepository, CreateAssetCommand, DependencyRepository,
     DirtyQueueEntry, DirtyQueueRepository, DirtyResolutionLog, DirtyResolutionLogRepository,
     EffectiveUpdateReason, RepositoryError,
 };
 use adam_domain::version::{SemVer, VersionConstraint};
-use adam_domain::repository::UpgradePolicy;
 use adam_domain::{
     AssetId, AssetTypeId, InMemoryAssetRepository, InMemoryDependencyRepository,
     InMemoryDirtyQueueRepository, InMemoryDirtyResolutionLogRepository, OrganizationId, ProjectId,
+    PropagationPolicy, RelationshipType,
 };
 use chrono::Utc;
 
@@ -552,7 +553,8 @@ async fn dependency_repo_updates_effective_baseline() {
         id: uuid::Uuid::new_v4(),
         source_id: source,
         target_id: target,
-        relationship: "depends_on".to_string(),
+        relationship: RelationshipType::DependsOn,
+        propagation_policy: PropagationPolicy::Dirty,
         declared_constraint: VersionConstraint::parse("^1.0.0").unwrap(),
         constraint_str: "^1.0.0".to_string(),
         effective_version: SemVer::parse("1.0.0").unwrap(),
@@ -625,7 +627,8 @@ async fn dependency_repo_downstream_records_include_effective_version() {
         id: uuid::Uuid::new_v4(),
         source_id: downstream,
         target_id: upstream,
-        relationship: "depends_on".to_string(),
+        relationship: RelationshipType::DependsOn,
+        propagation_policy: PropagationPolicy::Dirty,
         declared_constraint: VersionConstraint::parse("^1.0.0").unwrap(),
         constraint_str: "^1.0.0".to_string(),
         effective_version: SemVer::parse("1.0.1").unwrap(),

@@ -21,7 +21,7 @@ impl IdempotencyKey {
 
     /// Generate a unique idempotency key based on organization and request details
     pub fn generate(org_id: Uuid, resource_type: &str, unique_id: &str) -> Self {
-        Self(format!("{}:{}:{}", org_id, resource_type, unique_id))
+        Self(format!("{org_id}:{resource_type}:{unique_id}"))
     }
 }
 
@@ -174,11 +174,7 @@ mod tests {
 
     #[test]
     fn record_is_not_expired() {
-        let record = IdempotencyRecord::new(
-            IdempotencyKey::new("test"),
-            "hash",
-            "response",
-        );
+        let record = IdempotencyRecord::new(IdempotencyKey::new("test"), "hash", "response");
         assert!(!record.is_expired());
     }
 
@@ -218,11 +214,7 @@ mod tests {
         };
 
         // Create valid record
-        let valid = IdempotencyRecord::new(
-            IdempotencyKey::new("valid"),
-            "hash",
-            "response",
-        );
+        let valid = IdempotencyRecord::new(IdempotencyKey::new("valid"), "hash", "response");
 
         repo.save(&expired).await.unwrap();
         repo.save(&valid).await.unwrap();
@@ -230,10 +222,16 @@ mod tests {
         let deleted = repo.delete_expired().await.unwrap();
         assert_eq!(deleted, 1);
 
-        let found_expired = repo.find_by_key(&IdempotencyKey::new("expired")).await.unwrap();
+        let found_expired = repo
+            .find_by_key(&IdempotencyKey::new("expired"))
+            .await
+            .unwrap();
         assert!(found_expired.is_none());
 
-        let found_valid = repo.find_by_key(&IdempotencyKey::new("valid")).await.unwrap();
+        let found_valid = repo
+            .find_by_key(&IdempotencyKey::new("valid"))
+            .await
+            .unwrap();
         assert!(found_valid.is_some());
     }
 }

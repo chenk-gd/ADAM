@@ -104,13 +104,13 @@ pub struct AssetInstance {
     pub(crate) current_state: AssetState,
 
     // 新增字段 (根据 spec 5.2.3)
-    pub external_ref: String,                   // 外部系统引用地址
-    pub source: String,                         // 来源：git/wiki/jira/manual
-    pub metadata: serde_json::Value,            // 按类型 schema 的元数据
-    pub assignees: Vec<String>,                 // 责任人列表
-    pub(crate) publisher: Option<String>,       // 最新版本发布人
-    pub(crate) current_version: SemVer,         // 当前发布的版本号 (CHANGED: from Option<String>)
-    pub(crate) lock_version: i64,               // NEW: for optimistic locking
+    pub external_ref: String,             // 外部系统引用地址
+    pub source: String,                   // 来源：git/wiki/jira/manual
+    pub metadata: serde_json::Value,      // 按类型 schema 的元数据
+    pub assignees: Vec<String>,           // 责任人列表
+    pub(crate) publisher: Option<String>, // 最新版本发布人
+    pub(crate) current_version: SemVer,   // 当前发布的版本号 (CHANGED: from Option<String>)
+    pub(crate) lock_version: i64,         // NEW: for optimistic locking
 
     pub created_at: DateTime<Utc>,
     pub(crate) updated_at: DateTime<Utc>,
@@ -119,6 +119,7 @@ pub struct AssetInstance {
 
 impl AssetInstance {
     /// Create a new project-level asset
+    #[allow(clippy::too_many_arguments)]
     pub fn new_project_level(
         name: impl Into<String>,
         asset_type_id: AssetTypeId,
@@ -127,7 +128,7 @@ impl AssetInstance {
         external_ref: impl Into<String>,
         source: impl Into<String>,
         metadata: serde_json::Value,
-        initial_version: SemVer,  // NEW: required SemVer
+        initial_version: SemVer, // NEW: required SemVer
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -143,7 +144,7 @@ impl AssetInstance {
             metadata,
             assignees: vec![],
             publisher: None,
-            current_version: initial_version,  // CHANGED
+            current_version: initial_version, // CHANGED
             lock_version: 1,                  // NEW: initialize to 1
             created_at: now,
             updated_at: now,
@@ -159,7 +160,7 @@ impl AssetInstance {
         external_ref: impl Into<String>,
         source: impl Into<String>,
         metadata: serde_json::Value,
-        initial_version: SemVer,  // NEW: required SemVer
+        initial_version: SemVer, // NEW: required SemVer
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -175,7 +176,7 @@ impl AssetInstance {
             metadata,
             assignees: vec![],
             publisher: None,
-            current_version: initial_version,  // CHANGED
+            current_version: initial_version, // CHANGED
             lock_version: 1,                  // NEW: initialize to 1
             created_at: now,
             updated_at: now,
@@ -349,8 +350,8 @@ impl AssetInstance {
         metadata: serde_json::Value,
         assignees: Vec<String>,
         publisher: Option<String>,
-        current_version: SemVer,  // CHANGED
-        lock_version: i64,        // NEW
+        current_version: SemVer, // CHANGED
+        lock_version: i64,       // NEW
         created_at: DateTime<Utc>,
         updated_at: DateTime<Utc>,
         idempotency_key: Option<String>,
@@ -428,7 +429,7 @@ mod tests {
             "https://example.com/asset/1",
             "manual",
             serde_json::json!({"title": "Test"}),
-            SemVer::new(1, 0, 0),  // NEW: initial version
+            SemVer::new(1, 0, 0), // NEW: initial version
         );
 
         assert_eq!(asset.name, "Test Asset");
@@ -455,7 +456,7 @@ mod tests {
             "https://wiki.example.com/standards",
             "wiki",
             serde_json::json!({"category": "standard"}),
-            SemVer::new(0, 1, 0),  // NEW: initial version
+            SemVer::new(0, 1, 0), // NEW: initial version
         );
 
         assert_eq!(asset.name, "Org Standard");
@@ -478,7 +479,7 @@ mod tests {
             "https://example.com/asset",
             "manual",
             serde_json::json!({}),
-            SemVer::new(1, 0, 0),  // NEW: initial version
+            SemVer::new(1, 0, 0), // NEW: initial version
         );
 
         assert!(!asset.is_archived());

@@ -4,10 +4,10 @@
 //! using the semver crate's VersionReq.
 
 use super::rule::DependencyRuleId;
+use crate::asset::instance::AssetId;
 use crate::repository::AssetDependencyRecord;
-use crate::version::{SemVer, VersionConstraint};
-use crate::asset::instance::{AssetId};
 use crate::repository::UpgradePolicy;
+use crate::version::{SemVer, VersionConstraint};
 
 /// Pre-compiled dependency with version constraint for fast matching
 #[derive(Debug, Clone)]
@@ -121,7 +121,7 @@ impl CompiledDependency {
                         format!(",<{}.{}.{}", v.major, v.minor, v.patch)
                     }
                 };
-                Ok(format!("{}{}", min_str, max_str))
+                Ok(format!("{min_str}{max_str}"))
             }
         }
     }
@@ -223,7 +223,9 @@ impl CompiledDependencyCache {
     /// Get a cached dependency if not stale
     pub fn get(&self, record: &AssetDependencyRecord) -> Option<&CompiledDependency> {
         let id = DependencyRuleId(record.id);
-        self.cache.get(&id).filter(|c| !c.is_stale(&record.constraint_str, record.lock_version))
+        self.cache
+            .get(&id)
+            .filter(|c| !c.is_stale(&record.constraint_str, record.lock_version))
     }
 
     /// Compile and insert a dependency into cache, returning the id
@@ -290,6 +292,7 @@ impl Default for CompiledDependencyCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dependency::rule::{PropagationPolicy, RelationshipType};
     use crate::version::{Bound, VersionConstraint};
 
     fn create_test_dependency(
@@ -344,7 +347,8 @@ mod tests {
     #[test]
     fn test_compile_wildcard_constraint() {
         let constraint = VersionConstraint::Wildcard;
-        let dep = create_test_dependency(constraint, SemVer::new(1, 0, 0), UpgradePolicy::AutoMinor);
+        let dep =
+            create_test_dependency(constraint, SemVer::new(1, 0, 0), UpgradePolicy::AutoMinor);
 
         assert!(dep.matches(&SemVer::new(1, 0, 0)));
         assert!(dep.matches(&SemVer::new(2, 5, 3)));
@@ -429,7 +433,10 @@ mod tests {
             SemVer::new(1, 0, 0),
             UpgradePolicy::AutoPatch,
         );
-        assert_eq!(patch_dep.next_auto_version(&available), Some(SemVer::new(1, 0, 5)));
+        assert_eq!(
+            patch_dep.next_auto_version(&available),
+            Some(SemVer::new(1, 0, 5))
+        );
 
         // AutoMinor - should return 1.2.0 (highest for major=1)
         let minor_dep = create_test_dependency(
@@ -437,7 +444,10 @@ mod tests {
             SemVer::new(1, 0, 0),
             UpgradePolicy::AutoMinor,
         );
-        assert_eq!(minor_dep.next_auto_version(&available), Some(SemVer::new(1, 2, 0)));
+        assert_eq!(
+            minor_dep.next_auto_version(&available),
+            Some(SemVer::new(1, 2, 0))
+        );
 
         // Manual - should return None
         let manual_dep =
@@ -455,7 +465,8 @@ mod tests {
             id: uuid::Uuid::new_v4(),
             source_id: AssetId(uuid::Uuid::new_v4()),
             target_id: AssetId(uuid::Uuid::new_v4()),
-            relationship: "depends_on".to_string(),
+            relationship: RelationshipType::DependsOn,
+            propagation_policy: PropagationPolicy::Dirty,
             declared_constraint: VersionConstraint::Caret(SemVer::new(1, 0, 0)),
             constraint_str: "^1.0.0".to_string(),
             effective_version: SemVer::new(1, 0, 0),
@@ -494,7 +505,8 @@ mod tests {
             id,
             source_id: AssetId(uuid::Uuid::new_v4()),
             target_id: AssetId(uuid::Uuid::new_v4()),
-            relationship: "depends_on".to_string(),
+            relationship: RelationshipType::DependsOn,
+            propagation_policy: PropagationPolicy::Dirty,
             declared_constraint: VersionConstraint::Caret(SemVer::new(1, 0, 0)),
             constraint_str: "^1.0.0".to_string(),
             effective_version: SemVer::new(1, 0, 0),
@@ -514,7 +526,8 @@ mod tests {
             id,
             source_id: AssetId(uuid::Uuid::new_v4()),
             target_id: AssetId(uuid::Uuid::new_v4()),
-            relationship: "depends_on".to_string(),
+            relationship: RelationshipType::DependsOn,
+            propagation_policy: PropagationPolicy::Dirty,
             declared_constraint: VersionConstraint::Caret(SemVer::new(2, 0, 0)),
             constraint_str: "^2.0.0".to_string(),
             effective_version: SemVer::new(2, 0, 0),

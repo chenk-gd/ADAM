@@ -5,8 +5,7 @@
 use std::sync::Arc;
 
 use adam_domain::{
-    AssetId, AssetRepository, AssetVersion, AssetVersionRepository, DependencyRepository,
-    RepositoryError, SemVer,
+    AssetId, AssetRepository, AssetVersionRepository, DependencyRepository, RepositoryError, SemVer,
 };
 
 /// Error types for major upgrade operations
@@ -62,7 +61,10 @@ pub trait MajorUpgradeRepository: Send + Sync {
     async fn create(&self, operation: &MajorUpgradeOperation) -> Result<(), RepositoryError>;
 
     /// Find operation by ID
-    async fn find_by_id(&self, id: uuid::Uuid) -> Result<Option<MajorUpgradeOperation>, RepositoryError>;
+    async fn find_by_id(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<Option<MajorUpgradeOperation>, RepositoryError>;
 
     /// Update operation status
     async fn update_status(
@@ -80,8 +82,8 @@ where
     DR: DependencyRepository,
     UR: MajorUpgradeRepository,
 {
-    asset_repo: Arc<AR>,
-    version_repo: Arc<VR>,
+    _asset_repo: Arc<AR>,
+    _version_repo: Arc<VR>,
     dependency_repo: Arc<DR>,
     upgrade_repo: Arc<UR>,
 }
@@ -101,8 +103,8 @@ where
         upgrade_repo: Arc<UR>,
     ) -> Self {
         Self {
-            asset_repo,
-            version_repo,
+            _asset_repo: asset_repo,
+            _version_repo: version_repo,
             dependency_repo,
             upgrade_repo,
         }
@@ -175,7 +177,7 @@ where
             .upgrade_repo
             .find_by_id(operation_id)
             .await?
-            .ok_or_else(|| MajorUpgradeError::NotFound(format!("Operation {}", operation_id)))?;
+            .ok_or_else(|| MajorUpgradeError::NotFound(format!("Operation {operation_id}")))?;
 
         // Verify operation can be rolled back
         if operation.status != UpgradeStatus::Completed {

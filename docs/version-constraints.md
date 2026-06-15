@@ -250,6 +250,6 @@ cargo test -p adam-domain compiled -- --nocapture
 
 ## References
 
-- [Implementation Progress](./IMPLEMENTATION_PROGRESS.md)
+- [Implementation Progress](../.claude/work/IMPLEMENTATION_PROGRESS.md)
 - [SemVer Specification](https://semver.org/)
 - [Implementation Plan](../plans/2026-05-18-version-constraint-implementation.md)

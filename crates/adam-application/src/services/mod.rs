@@ -24,7 +24,10 @@ pub use major_upgrade::{
     UpgradeStatus,
 };
 pub use state_propagator::{StatePropagationError, StatePropagator};
-pub use unpublish::{UnpublishConfig, UnpublishError, UnpublishPolicy as ServiceUnpublishPolicy, UnpublishPropagation as ServiceUnpublishPropagation, UnpublishService};
+pub use unpublish::{
+    UnpublishConfig, UnpublishError, UnpublishPolicy as ServiceUnpublishPolicy,
+    UnpublishPropagation as ServiceUnpublishPropagation, UnpublishService,
+};
 pub use version_service::{
     ChangeType, ManualCleanCommand, ManualCleanResolution, PublishAssetCommand, PublishDependency,
     VersionService, VersionServiceError,

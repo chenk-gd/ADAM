@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use adam_domain::{
-    AssetId, AssetRepository, AssetVersion, AssetVersionRepository, DependencyRepository,
-    DirtyQueueRepository, RepositoryError, SemVer,
+    AssetId, AssetRepository, AssetVersionRepository, DependencyRepository, DirtyQueueRepository,
+    RepositoryError, SemVer,
 };
 
 /// Error types for unpublish operations
@@ -75,7 +75,7 @@ where
     DR: DependencyRepository,
     QR: DirtyQueueRepository,
 {
-    asset_repo: Arc<AR>,
+    _asset_repo: Arc<AR>,
     version_repo: Arc<VR>,
     dependency_repo: Arc<DR>,
     dirty_queue_repo: Arc<QR>,
@@ -96,7 +96,7 @@ where
         dirty_queue_repo: Arc<QR>,
     ) -> Self {
         Self {
-            asset_repo,
+            _asset_repo: asset_repo,
             version_repo,
             dependency_repo,
             dirty_queue_repo,
@@ -113,7 +113,7 @@ where
         &self,
         asset_id: AssetId,
         version: SemVer,
-        reason: String,
+        _reason: String,
     ) -> Result<(), UnpublishError> {
         // Get organization config (using default for now)
         let config = UnpublishConfig::default();
@@ -132,9 +132,7 @@ where
                     .version_repo
                     .find_by_version(&asset_id, &version_str)
                     .await?
-                    .ok_or_else(|| {
-                        UnpublishError::VersionNotFound(version.to_string())
-                    })?;
+                    .ok_or_else(|| UnpublishError::VersionNotFound(version.to_string()))?;
 
                 // Check if within window
                 let age = chrono::Utc::now() - version_record.released_at;
@@ -149,11 +147,8 @@ where
         }
 
         // Propagate to downstream if configured
-        match config.propagation {
-            UnpublishPropagation::NotifyDownstream => {
-                self.propagate_unpublish(&asset_id, &version).await?;
-            }
-            _ => {}
+        if config.propagation == UnpublishPropagation::NotifyDownstream {
+            self.propagate_unpublish(&asset_id, &version).await?;
         }
 
         // Note: Actually marking as unpublished would require:
@@ -198,6 +193,7 @@ where
     }
 
     /// Get organization config (placeholder - would fetch from config store)
+    #[allow(dead_code)]
     async fn get_org_config(&self, _asset_id: AssetId) -> Result<UnpublishConfig, UnpublishError> {
         Ok(UnpublishConfig::default())
     }
@@ -207,9 +203,8 @@ where
 mod tests {
     use super::*;
     use adam_domain::{
-        AssetLevel, AssetTypeId, CreateAssetCommand, InMemoryAssetRepository,
-        InMemoryAssetVersionRepository, InMemoryDependencyRepository, InMemoryDirtyQueueRepository,
-        OrganizationId,
+        InMemoryAssetRepository, InMemoryAssetVersionRepository, InMemoryDependencyRepository,
+        InMemoryDirtyQueueRepository,
     };
 
     #[tokio::test]
@@ -221,11 +216,7 @@ mod tests {
 
         // Note: This test would require mocking the config to return Never policy
         // For now, we just verify the service can be created
-        let _service = UnpublishService::new(
-            asset_repo,
-            version_repo,
-            dependency_repo,
-            dirty_queue_repo,
-        );
+        let _service =
+            UnpublishService::new(asset_repo, version_repo, dependency_repo, dirty_queue_repo);
     }
 }

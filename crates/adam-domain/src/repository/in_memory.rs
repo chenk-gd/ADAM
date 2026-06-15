@@ -9,11 +9,12 @@ use crate::repository::{
     DependencyRepository, DirtyResolutionLog, DirtyResolutionLogRepository, EffectiveUpdateReason,
     RepositoryError, UpdateAssetCommand, UpgradePolicy,
 };
+use crate::version::{SemVer, VersionConstraint};
 use crate::{
     DirtyQueueEntry, DirtyQueueRepository, OrganizationId, ProjectId, VirtualInstance,
     VirtualInstanceId, VirtualInstanceRepository,
 };
-use crate::version::{SemVer, VersionConstraint};
+use crate::{PropagationPolicy, RelationshipType};
 use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -560,7 +561,8 @@ impl DependencyRepository for InMemoryDependencyRepository {
             id: uuid::Uuid::new_v4(),
             source_id: *source_id,
             target_id: *target_id,
-            relationship: "depends_on".to_string(),
+            relationship: RelationshipType::DependsOn,
+            propagation_policy: PropagationPolicy::Dirty,
             declared_constraint: VersionConstraint::Wildcard, // Match any version for simple dependencies
             constraint_str: "*".to_string(),
             effective_version: SemVer::new(0, 0, 0),
@@ -776,5 +778,140 @@ impl AssetVersionRepository for InMemoryAssetVersionRepository {
             .filter(|v| v.asset_id == *asset_id)
             .max_by_key(|v| &v.released_at)
             .cloned())
+    }
+}
+
+/// In-memory dependency rule repository for testing
+pub struct InMemoryDependencyRuleRepository {
+    rules: Mutex<Vec<crate::dependency::DependencyRule>>,
+}
+
+impl InMemoryDependencyRuleRepository {
+    /// Create a new empty repository
+    pub fn new() -> Self {
+        Self {
+            rules: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Create a repository with pre-populated rules
+    pub fn with_rules(rules: Vec<crate::dependency::DependencyRule>) -> Self {
+        Self {
+            rules: Mutex::new(rules),
+        }
+    }
+}
+
+impl Default for InMemoryDependencyRuleRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl crate::dependency::DependencyRuleRepository for InMemoryDependencyRuleRepository {
+    async fn create(
+        &self,
+        rule: &crate::dependency::DependencyRule,
+    ) -> Result<(), RepositoryError> {
+        let mut rules = self
+            .rules
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        rules.push(rule.clone());
+        Ok(())
+    }
+
+    async fn find_by_source_type(
+        &self,
+        type_id: &AssetTypeId,
+    ) -> Result<Vec<crate::dependency::DependencyRule>, RepositoryError> {
+        let rules = self
+            .rules
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        Ok(rules
+            .iter()
+            .filter(|r| r.source_type_id == *type_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_target_type(
+        &self,
+        type_id: &AssetTypeId,
+    ) -> Result<Vec<crate::dependency::DependencyRule>, RepositoryError> {
+        let rules = self
+            .rules
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        Ok(rules
+            .iter()
+            .filter(|r| r.target_type_id == *type_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn is_dependency_allowed(
+        &self,
+        source_type: &AssetTypeId,
+        target_type: &AssetTypeId,
+    ) -> Result<bool, RepositoryError> {
+        let rules = self
+            .rules
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        Ok(rules
+            .iter()
+            .any(|r| r.source_type_id == *source_type && r.target_type_id == *target_type))
+    }
+
+    async fn delete(
+        &self,
+        rule_id: &crate::dependency::DependencyRuleId,
+    ) -> Result<(), RepositoryError> {
+        let mut rules = self
+            .rules
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        let id = rule_id;
+        rules.retain(|r| r.id != *id);
+        Ok(())
+    }
+
+    async fn find_allowed_type_rules(
+        &self,
+        source_type: &AssetTypeId,
+        target_type: &AssetTypeId,
+    ) -> Result<Vec<crate::dependency::DependencyRule>, RepositoryError> {
+        let rules = self
+            .rules
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        Ok(rules
+            .iter()
+            .filter(|r| r.matches(source_type, target_type))
+            .cloned()
+            .collect())
+    }
+
+    async fn find_matching_rules(
+        &self,
+        source_type: &AssetTypeId,
+        source_metadata: &serde_json::Value,
+        target_type: &AssetTypeId,
+        target_metadata: &serde_json::Value,
+    ) -> Result<Vec<crate::dependency::DependencyRule>, RepositoryError> {
+        let rules = self
+            .rules
+            .lock()
+            .map_err(|e| RepositoryError::DatabaseError(format!("Mutex poisoned: {e}")))?;
+        Ok(rules
+            .iter()
+            .filter(|r| {
+                r.matches_with_metadata(source_type, source_metadata, target_type, target_metadata)
+            })
+            .cloned()
+            .collect())
     }
 }

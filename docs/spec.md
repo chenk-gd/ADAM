@@ -97,6 +97,14 @@
 - 支持自定义扩展资产类型
 - 每种资产类型包含：ID、名称、描述、元数据schema
 
+#### FR-001a: 工作项子类型
+**描述**: 工作项资产支持多种子类型  
+**优先级**: 中  
+**详细说明**:
+- `work_item_kind` 是存储在 `metadata.work_item_kind` 中的元数据字段，用于区分工作项子类型
+- 支持的子类型：`feature`, `bugfix`, `test_execution`, `refactor`, `release`, `maintenance`
+- 子类型不作为独立资产类型，而是统一通过元数据字段区分
+
 #### FR-002: 资产类型元数据
 **描述**: 每种资产类型可定义元数据结构  
 **优先级**: 中  
@@ -136,6 +144,13 @@
 - **依赖关系类型**：
   - `depends_on`: 上游变化会触发下游 Dirty（对 Final 资产无效）
   - `references`: 仅引用关系，不触发 Dirty（如代码引用编码规范）
+  - `implements`: 下游资产实现上游资产（如代码提交实现工作项）
+  - `fixes`: 下游资产修复上游资产（如bugfix修复需求）
+  - `verifies`: 下游资产验证上游资产（如测试用例验证需求）
+  - `executes`: 下游资产执行上游资产（如流水线执行代码提交）
+  - `produces`: 下游资产产生上游资产（如流水线产生构建产物）
+  - `blocks`: 下游资产阻塞上游资产（如工作项阻塞需求）
+  - `relates_to`: 通用关联关系，不触发 Dirty
 
 #### FR-004: 依赖关系验证
 **描述**: 创建资产实例时验证依赖关系的合法性  
@@ -1175,6 +1190,37 @@ A ──> B ──> C        ✓ 合法DAG
 - Git 代码提交资产幂等键为 `source + project_id + repository + commit_sha`
 - CI/CD 执行记录幂等键为 `source + project_id + pipeline_id + run_id`
 - 自动化注册不得绕过依赖合法性、项目边界、组织边界和 DAG 校验
+
+---
+
+## 7. 业务规则（扩展）
+
+### BR-011: 传播策略（PropagationPolicy）
+**描述**: 控制上游资产发布时是否触发下游 Dirty 状态
+**优先级**: 高  
+**详细说明**:
+- `dirty`: 上游发布时直接触发下游 Dirty 状态（默认对于 `depends_on`/`implements`/`fixes`/`verifies` 关系）
+- `context_only`: 仅用于 AI 上下文查询，不触发 Dirty 状态（默认对于 `references`/`executes` 关系）
+- `audit_only`: 仅用于审计追溯，不触发 Dirty 状态（默认对于 `produces`/`blocks`/`relates_to` 关系）
+- 解析顺序：显式发布字段 > 元数据匹配规则 > 类型级规则 > 关系默认值
+
+### BR-012: 默认规则矩阵
+| 关系类型 | 默认传播策略 | 元数据匹配示例 |
+|---------|-------------|----------------|
+| `depends_on` | `dirty` | `metadata.work_item_kind = "feature"` |
+| `references` | `context_only` | `metadata.content_type = "markdown"` |
+| `implements` | `dirty` | `metadata.asset_type = "code_commit"` |
+| `fixes` | `dirty` | `metadata.severity = "critical"` |
+| `verifies` | `dirty` | `metadata.test_type = "integration"` |
+| `executes` | `context_only` | `metadata.pipeline_type = "ci"` |
+| `produces` | `audit_only` | `metadata.artifact_type = "docker-image"` |
+| `blocks` | `audit_only` | `metadata.blocker_type = "resource-limitation"` |
+| `relates_to` | `audit_only` | `metadata.relation_type = "cross-team"` |
+
+### BR-013: 元数据过滤规则
+- 元数据字段用于引导策略推断，但不替代类型级合法性检查
+- 元数据过滤规则仅在匹配时提供更具体的传播策略
+- 未匹配时使用关系默认值
 
 ---
 

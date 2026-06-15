@@ -16,22 +16,23 @@ pub use auth::{AuthPrincipal, AuthorizationError, AuthorizationService, Permissi
 pub use dependency::boundary::{AssetLevel, DependencyBoundaryContext, DependencyError};
 pub use dependency::dag::{DAGError, DAGValidator};
 pub use dependency::{
-    DependencyRule, DependencyRuleId, DependencyRuleRepository, RelationshipType,
+    DependencyRule, DependencyRuleId, DependencyRuleRepository, PropagationPolicy,
+    RelationshipType, UnknownPropagationPolicy, UnknownRelationshipType,
+};
+pub use idempotency::{
+    IdempotencyError, IdempotencyKey, IdempotencyRecord, IdempotencyRepository,
+    InMemoryIdempotencyRepository,
 };
 pub use repository::in_memory::{
     InMemoryAssetRepository, InMemoryAssetTypeRepository, InMemoryAssetVersionRepository,
-    InMemoryDependencyRepository, InMemoryDirtyQueueRepository,
+    InMemoryDependencyRepository, InMemoryDependencyRuleRepository, InMemoryDirtyQueueRepository,
     InMemoryDirtyResolutionLogRepository, InMemoryVirtualInstanceRepository,
 };
 pub use repository::{
     AssetDependencyRecord, AssetRepository, AssetTypeRepository, CreateAssetCommand,
     DependencyRepository, DirtyQueueEntry, DirtyQueueRepository, DirtyResolutionLog,
-    DirtyResolutionLogRepository, EffectiveUpdateReason, RepositoryError, UpdateAssetCommand,
-    UpgradePolicy,
-};
-pub use idempotency::{
-    IdempotencyError, IdempotencyKey, IdempotencyRecord, IdempotencyRepository,
-    InMemoryIdempotencyRepository,
+    DirtyResolutionLogRepository, EffectiveUpdateReason, NewDependencyRecord, RepositoryError,
+    UpdateAssetCommand, UpgradePolicy,
 };
 pub use version::{SemVer, VersionConstraint};
 pub use virtual_instance::{VirtualInstance, VirtualInstanceId, VirtualInstanceRepository};

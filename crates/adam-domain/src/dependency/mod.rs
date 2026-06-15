@@ -5,7 +5,8 @@ pub mod compiled;
 pub mod dag;
 pub mod rule;
 
-pub use compiled::{
-    CompiledDependency, CompiledDependencyCache, CompilationError,
+pub use compiled::{CompilationError, CompiledDependency, CompiledDependencyCache};
+pub use rule::{
+    DependencyRule, DependencyRuleId, DependencyRuleRepository, PropagationPolicy,
+    RelationshipType, UnknownPropagationPolicy, UnknownRelationshipType,
 };
-pub use rule::{DependencyRule, DependencyRuleId, DependencyRuleRepository, RelationshipType};
