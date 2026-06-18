@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 880" width="960" height="880">
+  <defs>
+    <marker id="arrowA" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowB" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#10b981"/>
+    </marker>
+    <marker id="arrowC" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowE" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f97316"/>
+    </marker>
+    <marker id="arrowF" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowG" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ef4444"/>
+    </marker>
+    <marker id="arrowH" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280"/>
+    </marker>
+    <filter id="shadowSoft" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <filter id="shadowGlass" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#020617" flood-opacity="0.28"/>
+    </filter>
+    <style>
+    text { font-family: 'Noto Sans SC', 'Helvetica Neue', Helvetica, Arial, 'Microsoft YaHei', sans-serif; }
+    .title { font-size: 30px; font-weight: 700; fill: #111827; }
+    .subtitle { font-size: 14px; font-weight: 500; fill: #6b7280; }
+    .section { font-size: 13px; font-weight: 700; fill: #2563eb; letter-spacing: 1.4px; }
+    .section-sub { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    .node-title { font-size: 15px; font-weight: 700; fill: #111827; }
+    .node-sub { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .node-type { font-size: 12px; font-weight: 700; fill: #9ca3af; letter-spacing: 0.08em; }
+    .arrow-label { font-size: 12px; font-weight: 600; fill: #6b7280; }
+    .legend { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .footnote { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    </style>
+  </defs>
+  <rect width="960.0" height="880.0" fill="#ffffff"/>
+  <text x="480.0" y="56" text-anchor="middle" class="title">Agent 任务执行</text>
+  <path d="M 480.0,160.0 L 480.0,210.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 480.0,270.0 L 480.0,320.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 480.0,380.0 L 480.0,430.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 480.0,490.0 L 480.0,540.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 480.0,600.0 L 480.0,650.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 480.0,710.0 L 480.0,760.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <rect x="280.0" y="100.0" width="400.0" height="60.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="480.0" y="121.5" text-anchor="middle" class="node-title">
+    <tspan x="480.0" dy="0">工作流服务 → AgentTaskService</tspan>
+    <tspan x="480.0" dy="17">创建 AgentTask</tspan>
+  </text>
+  <rect x="280.0" y="210.0" width="400.0" height="60.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="480.0" y="231.5" text-anchor="middle" class="node-title">
+    <tspan x="480.0" dy="0">AI Agent → AgentTaskService</tspan>
+    <tspan x="480.0" dy="17">list_pending_agent_tasks</tspan>
+  </text>
+  <rect x="280.0" y="320.0" width="400.0" height="60.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="480.0" y="341.5" text-anchor="middle" class="node-title">
+    <tspan x="480.0" dy="0">AI Agent → AgentTaskService</tspan>
+    <tspan x="480.0" dy="17">claim_agent_task</tspan>
+  </text>
+  <rect x="280.0" y="430.0" width="400.0" height="60.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="480.0" y="451.5" text-anchor="middle" class="node-title">
+    <tspan x="480.0" dy="0">AgentTaskService → AI Agent</tspan>
+    <tspan x="480.0" dy="17">返回上下文和任务参数</tspan>
+  </text>
+  <rect x="280.0" y="540.0" width="400.0" height="60.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="480.0" y="561.5" text-anchor="middle" class="node-title">
+    <tspan x="480.0" dy="0">AI Agent → AgentTaskService</tspan>
+    <tspan x="480.0" dy="17">submit_agent_task_result</tspan>
+  </text>
+  <rect x="280.0" y="650.0" width="400.0" height="60.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="480.0" y="671.5" text-anchor="middle" class="node-title">
+    <tspan x="480.0" dy="0">AgentTaskService → 资产服务</tspan>
+    <tspan x="480.0" dy="17">关联产出资产</tspan>
+  </text>
+  <rect x="280.0" y="760.0" width="400.0" height="60.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="480.0" y="781.5" text-anchor="middle" class="node-title">
+    <tspan x="480.0" dy="0">AgentTaskService → 工作流服务</tspan>
+    <tspan x="480.0" dy="17">触发 AgentTaskSucceeded</tspan>
+  </text>
+</svg>

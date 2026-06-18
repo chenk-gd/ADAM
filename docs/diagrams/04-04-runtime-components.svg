@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 600" width="960" height="600">
+  <defs>
+    <marker id="arrowA" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowB" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#10b981"/>
+    </marker>
+    <marker id="arrowC" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowE" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f97316"/>
+    </marker>
+    <marker id="arrowF" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowG" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ef4444"/>
+    </marker>
+    <marker id="arrowH" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280"/>
+    </marker>
+    <filter id="shadowSoft" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <filter id="shadowGlass" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#020617" flood-opacity="0.28"/>
+    </filter>
+    <style>
+    text { font-family: 'Noto Sans SC', 'Helvetica Neue', Helvetica, Arial, 'Microsoft YaHei', sans-serif; }
+    .title { font-size: 30px; font-weight: 700; fill: #111827; }
+    .subtitle { font-size: 14px; font-weight: 500; fill: #6b7280; }
+    .section { font-size: 13px; font-weight: 700; fill: #2563eb; letter-spacing: 1.4px; }
+    .section-sub { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    .node-title { font-size: 15px; font-weight: 700; fill: #111827; }
+    .node-sub { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .node-type { font-size: 12px; font-weight: 700; fill: #9ca3af; letter-spacing: 0.08em; }
+    .arrow-label { font-size: 12px; font-weight: 600; fill: #6b7280; }
+    .legend { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .footnote { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    </style>
+  </defs>
+  <rect width="960.0" height="600.0" fill="#ffffff"/>
+  <text x="480.0" y="56" text-anchor="middle" class="title">运行时组件</text>
+  <path d="M 240.0,105.0 L 340.0,105.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 180.0,205.0 L 340.0,205.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 240.0,305.0 L 340.0,305.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 405.0,130.0 L 645.0,180.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 470.0,205.0 L 580.0,205.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 415.0,280.0 L 645.0,230.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 645.0,180.0 L 850.0,140.0" fill="none" stroke="#10b981" stroke-width="2.4" marker-end="url(#arrowB)"/>
+  <path d="M 645.0,230.0 L 670.0,320.0" fill="none" stroke="#10b981" stroke-width="2.4" marker-end="url(#arrowB)"/>
+  <path d="M 760.0,350.0 L 780.0,345.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 850.0,320.0 L 645.0,230.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 850.0,370.0 L 855.0,440.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 780.0,465.0 L 240.0,305.0" fill="none" stroke="#f97316" stroke-width="2.4" marker-end="url(#arrowE)"/>
+  <rect x="60.0" y="80.0" width="180.0" height="50.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="150.0" y="105.0" text-anchor="middle" class="node-title">研发人员 / 管理界面</text>
+  <rect x="60.0" y="180.0" width="120.0" height="50.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="120.0" y="205.0" text-anchor="middle" class="node-title">AI Agent</text>
+  <rect x="60.0" y="280.0" width="180.0" height="50.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="150.0" y="305.0" text-anchor="middle" class="node-title">Git / Wiki / PM / CI</text>
+  <rect x="340.0" y="80.0" width="130.0" height="50.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="405.0" y="105.0" text-anchor="middle" class="node-title">REST API</text>
+  <rect x="340.0" y="180.0" width="130.0" height="50.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="405.0" y="205.0" text-anchor="middle" class="node-title">MCP Server</text>
+  <rect x="340.0" y="280.0" width="150.0" height="50.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="415.0" y="305.0" text-anchor="middle" class="node-title">外部系统适配器</text>
+  <rect x="580.0" y="180.0" width="130.0" height="50.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="645.0" y="205.0" text-anchor="middle" class="node-title">应用服务</text>
+  <ellipse cx="850.0" cy="87.5" rx="35.0" ry="7.5" fill="#ecfdf5" stroke="#10b981" stroke-width="2.2"/>
+  <rect x="780.0" y="87.5" width="140.0" height="45.0" fill="#ecfdf5" stroke="#10b981" stroke-width="2.2"/>
+  <ellipse cx="850.0" cy="132.5" rx="35.0" ry="7.5" fill="#ecfdf5" stroke="#10b981" stroke-width="2.2"/>
+  <ellipse cx="850.0" cy="102.8" rx="35.0" ry="7.5" fill="none" stroke="#10b981" stroke-opacity="0.45" stroke-width="1.2"/>
+  <ellipse cx="850.0" cy="116.0" rx="35.0" ry="7.5" fill="none" stroke="#10b981" stroke-opacity="0.25" stroke-width="1.2"/>
+  <text x="850.0" y="104.0" text-anchor="middle" class="node-title">PostgreSQL</text>
+  <rect x="580.0" y="320.0" width="180.0" height="60.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="670.0" y="341.5" text-anchor="middle" class="node-title">
+    <tspan x="670.0" dy="0">WorkflowEvent /</tspan>
+    <tspan x="670.0" dy="17">DirtyQueue</tspan>
+  </text>
+  <rect x="780.0" y="320.0" width="140.0" height="50.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="850.0" y="345.0" text-anchor="middle" class="node-title">异步 Worker</text>
+  <rect x="780.0" y="440.0" width="150.0" height="50.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="855.0" y="465.0" text-anchor="middle" class="node-title">外部系统连接器</text>
+</svg>

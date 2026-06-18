@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 520" width="960" height="520">
+  <defs>
+    <marker id="arrowA" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowB" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#10b981"/>
+    </marker>
+    <marker id="arrowC" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowE" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f97316"/>
+    </marker>
+    <marker id="arrowF" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowG" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ef4444"/>
+    </marker>
+    <marker id="arrowH" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280"/>
+    </marker>
+    <filter id="shadowSoft" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <filter id="shadowGlass" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#020617" flood-opacity="0.28"/>
+    </filter>
+    <style>
+    text { font-family: 'Noto Sans SC', 'Helvetica Neue', Helvetica, Arial, 'Microsoft YaHei', sans-serif; }
+    .title { font-size: 30px; font-weight: 700; fill: #111827; }
+    .subtitle { font-size: 14px; font-weight: 500; fill: #6b7280; }
+    .section { font-size: 13px; font-weight: 700; fill: #2563eb; letter-spacing: 1.4px; }
+    .section-sub { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    .node-title { font-size: 15px; font-weight: 700; fill: #111827; }
+    .node-sub { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .node-type { font-size: 12px; font-weight: 700; fill: #9ca3af; letter-spacing: 0.08em; }
+    .arrow-label { font-size: 12px; font-weight: 600; fill: #6b7280; }
+    .legend { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .footnote { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    </style>
+  </defs>
+  <rect width="960.0" height="520.0" fill="#ffffff"/>
+  <text x="480.0" y="56" text-anchor="middle" class="title">ADAM 模块关系</text>
+  <path d="M 220.0,187.5 L 280.0,187.5" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 420.0,187.5 L 480.0,187.5" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 620.0,187.5 L 680.0,187.5" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 750.0,215.0 L 760.0,280.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 760.0,335.0 L 570.0,400.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 760.0,335.0 L 770.0,400.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+  <path d="M 570.0,400.0 L 350.0,215.0" fill="none" stroke="#ef4444" stroke-width="2.4" marker-end="url(#arrowG)"/>
+  <path d="M 770.0,400.0 L 750.0,215.0" fill="none" stroke="#ef4444" stroke-width="2.4" marker-end="url(#arrowG)"/>
+  <rect x="80.0" y="160.0" width="140.0" height="55.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="150.0" y="187.5" text-anchor="middle" class="node-title">资产管理</text>
+  <rect x="280.0" y="160.0" width="140.0" height="55.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="350.0" y="187.5" text-anchor="middle" class="node-title">版本发布</text>
+  <rect x="480.0" y="160.0" width="140.0" height="55.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="550.0" y="187.5" text-anchor="middle" class="node-title">依赖图</text>
+  <rect x="680.0" y="160.0" width="140.0" height="55.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="750.0" y="187.5" text-anchor="middle" class="node-title">状态传播</text>
+  <rect x="680.0" y="280.0" width="160.0" height="55.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="760.0" y="307.5" text-anchor="middle" class="node-title">工作流自动化</text>
+  <rect x="500.0" y="400.0" width="140.0" height="55.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="570.0" y="427.5" text-anchor="middle" class="node-title">Agent 任务</text>
+  <rect x="700.0" y="400.0" width="140.0" height="55.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="770.0" y="427.5" text-anchor="middle" class="node-title">人工审批</text>
+</svg>
