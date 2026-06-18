@@ -74,7 +74,7 @@ pub struct ManualCleanCommand {
 
 /// Resolve the final relationship and propagation policy for a dependency.
 ///
-/// Priority: explicit publish fields > metadata-matching rule > type-level rule > relationship default
+/// Priority: explicit publish fields > metadata-matching rule > unfiltered type-level rule > relationship default
 fn resolve_dependency_policy(
     explicit_relationship: Option<RelationshipType>,
     explicit_policy: Option<PropagationPolicy>,
@@ -84,7 +84,11 @@ fn resolve_dependency_policy(
     let selected_rule = matching_rules
         .iter()
         .max_by_key(|rule| rule.specificity())
-        .or_else(|| type_rules.first());
+        .or_else(|| {
+            type_rules.iter().find(|rule| {
+                rule.source_metadata_filter.is_none() && rule.target_metadata_filter.is_none()
+            })
+        });
 
     let relationship = explicit_relationship
         .or_else(|| selected_rule.map(|rule| rule.relationship))
@@ -95,6 +99,23 @@ fn resolve_dependency_policy(
         .unwrap_or_else(|| relationship.default_propagation_policy());
 
     (relationship, policy)
+}
+
+fn parse_dependency_constraint(input: &str) -> Result<VersionConstraint, VersionServiceError> {
+    let trimmed = input.trim();
+    let constraint = if trimmed == "*"
+        || trimmed.starts_with('^')
+        || trimmed.starts_with('~')
+        || trimmed.starts_with('=')
+        || trimmed.starts_with('>')
+        || trimmed.starts_with('<')
+    {
+        VersionConstraint::parse(trimmed)
+    } else {
+        SemVer::parse(trimmed).map(VersionConstraint::Caret)
+    };
+
+    constraint.map_err(|e| VersionServiceError::InvalidVersion(format!("{input}: {e}")))
 }
 
 /// Service for asset versioning and state management
@@ -165,30 +186,8 @@ impl<
             ));
         }
 
-        let dependency_snapshots: Vec<DependencySnapshot> = cmd
-            .dependencies
-            .iter()
-            .map(|dependency| DependencySnapshot {
-                upstream_asset_id: dependency.upstream_asset_id,
-                upstream_version: dependency.version.clone(),
-            })
-            .collect();
-
-        let mut asset_version = AssetVersion::new(
-            cmd.asset_id,
-            version.to_string(),
-            asset.metadata.clone(),
-            dependency_snapshots,
-            cmd.release_notes.clone(),
-            cmd.publisher.clone(),
-        );
-        asset_version.suggested_type = cmd.suggested_type.clone();
-
-        // Persist the asset version
-        self.version_repo
-            .create(&asset_version)
-            .await
-            .map_err(VersionServiceError::from)?;
+        let mut dependency_snapshots = Vec::new();
+        let mut dependency_records = Vec::new();
 
         for dependency in &cmd.dependencies {
             let upstream_asset = self
@@ -221,10 +220,11 @@ impl<
                 .await
                 .map_err(VersionServiceError::from)?;
 
-            let declared_constraint = VersionConstraint::parse(&dependency.version)
-                .unwrap_or_else(|_| VersionConstraint::parse("^0.0.0").unwrap());
-            let effective_version =
-                SemVer::parse(&dependency.version).unwrap_or_else(|_| SemVer::new(0, 0, 0));
+            let declared_constraint = parse_dependency_constraint(&dependency.version)?;
+            let effective_version = SemVer::parse(dependency.version.trim())
+                .unwrap_or_else(|_| upstream_asset.current_version().clone());
+            let constraint_str = declared_constraint.to_string();
+            let effective_version_str = effective_version.to_string();
 
             let (relationship, propagation_policy) = resolve_dependency_policy(
                 dependency.relationship,
@@ -244,10 +244,34 @@ impl<
             })
             .with_propagation_policy(propagation_policy)
             .with_upgrade_policy(dependency.upgrade_policy.unwrap_or_default())
-            .with_constraint_str(format!("^{}", dependency.version));
+            .with_constraint_str(constraint_str);
 
+            dependency_snapshots.push(DependencySnapshot {
+                upstream_asset_id: dependency.upstream_asset_id,
+                upstream_version: effective_version_str,
+            });
+            dependency_records.push(record);
+        }
+
+        let mut asset_version = AssetVersion::new(
+            cmd.asset_id,
+            version.to_string(),
+            asset.metadata.clone(),
+            dependency_snapshots,
+            cmd.release_notes.clone(),
+            cmd.publisher.clone(),
+        );
+        asset_version.suggested_type = cmd.suggested_type.clone();
+
+        // Persist only after all dependency declarations have been validated and resolved.
+        self.version_repo
+            .create(&asset_version)
+            .await
+            .map_err(VersionServiceError::from)?;
+
+        for record in &dependency_records {
             self.dependency_repo
-                .create_dependency_record(&record)
+                .create_dependency_record(record)
                 .await
                 .map_err(VersionServiceError::from)?;
         }
@@ -701,6 +725,94 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(VersionServiceError::InvalidState(_))));
+
+        let versions = service
+            .version_repo
+            .find_by_asset(&downstream.id)
+            .await
+            .unwrap();
+        assert!(
+            versions.is_empty(),
+            "failed dependency validation must not persist an asset version"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_preserves_constraint_string_and_uses_upstream_baseline() {
+        let org_id = OrganizationId::new();
+        let project_id = ProjectId::new();
+        let downstream_type = AssetTypeId::new();
+        let upstream_type = AssetTypeId::new();
+
+        let asset_repo = InMemoryAssetRepository::new();
+        let upstream = asset_repo
+            .create(&create_asset_command(
+                "Requirement",
+                org_id,
+                project_id,
+                upstream_type,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        asset_repo
+            .update_publication(
+                &upstream.id,
+                "1.4.2".to_string(),
+                "owner".to_string(),
+                AssetState::Clean,
+            )
+            .await
+            .unwrap();
+        let downstream = asset_repo
+            .create(&create_asset_command(
+                "Feature Work",
+                org_id,
+                project_id,
+                downstream_type,
+                serde_json::json!({"work_item_kind": "feature"}),
+            ))
+            .await
+            .unwrap();
+
+        let rule_repo = allow_rule(downstream_type, upstream_type);
+        let service = VersionService::new(
+            asset_repo,
+            InMemoryDirtyQueueRepository::new(),
+            InMemoryAssetVersionRepository::new(),
+            InMemoryDependencyRepository::new(),
+            InMemoryDirtyResolutionLogRepository::new(),
+        );
+
+        service
+            .publish(
+                PublishAssetCommand {
+                    asset_id: downstream.id,
+                    version: "1.0.0".to_string(),
+                    publisher: "publisher".to_string(),
+                    release_notes: "constraint publish".to_string(),
+                    dependencies: vec![PublishDependency {
+                        upstream_asset_id: upstream.id,
+                        version: "^1.0.0".to_string(),
+                        relationship: None,
+                        propagation_policy: None,
+                        upgrade_policy: None,
+                    }],
+                    suggested_type: None,
+                },
+                &rule_repo,
+            )
+            .await
+            .unwrap();
+
+        let records = service
+            .dependency_repo
+            .find_upstream_dependencies(&downstream.id)
+            .await
+            .unwrap();
+
+        assert_eq!(records[0].constraint_str, "^1.0.0");
+        assert_eq!(records[0].effective_version.to_string(), "1.4.2");
     }
 
     #[tokio::test]
@@ -788,6 +900,84 @@ mod tests {
             records[0].propagation_policy,
             PropagationPolicy::ContextOnly
         );
+    }
+
+    #[tokio::test]
+    async fn publish_uses_defaults_when_no_metadata_rule_matches() {
+        let org_id = OrganizationId::new();
+        let project_id = ProjectId::new();
+        let work_item_type = AssetTypeId::new();
+        let requirement_type = AssetTypeId::new();
+
+        let asset_repo = InMemoryAssetRepository::new();
+        let requirement = asset_repo
+            .create(&create_asset_command(
+                "Requirement",
+                org_id,
+                project_id,
+                requirement_type,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        let bugfix = asset_repo
+            .create(&create_asset_command(
+                "Bugfix",
+                org_id,
+                project_id,
+                work_item_type,
+                serde_json::json!({"work_item_kind": "bugfix"}),
+            ))
+            .await
+            .unwrap();
+
+        let service = VersionService::new(
+            asset_repo,
+            InMemoryDirtyQueueRepository::new(),
+            InMemoryAssetVersionRepository::new(),
+            InMemoryDependencyRepository::new(),
+            InMemoryDirtyResolutionLogRepository::new(),
+        );
+
+        let rule_repo = InMemoryDependencyRuleRepository::with_rules(vec![
+            DependencyRule::new(
+                work_item_type,
+                requirement_type,
+                RelationshipType::References,
+                true,
+            )
+            .with_source_metadata_filter(serde_json::json!({"work_item_kind": "feature"}))
+            .with_propagation_policy(PropagationPolicy::ContextOnly),
+        ]);
+
+        service
+            .publish(
+                PublishAssetCommand {
+                    asset_id: bugfix.id,
+                    version: "1.0.0".to_string(),
+                    publisher: "publisher".to_string(),
+                    release_notes: "publish bugfix".to_string(),
+                    dependencies: vec![PublishDependency {
+                        upstream_asset_id: requirement.id,
+                        version: "1.0.0".to_string(),
+                        relationship: None,
+                        propagation_policy: None,
+                        upgrade_policy: None,
+                    }],
+                    suggested_type: None,
+                },
+                &rule_repo,
+            )
+            .await
+            .unwrap();
+
+        let records = service
+            .dependency_repo
+            .find_upstream_dependencies(&bugfix.id)
+            .await
+            .unwrap();
+        assert_eq!(records[0].relationship, RelationshipType::DependsOn);
+        assert_eq!(records[0].propagation_policy, PropagationPolicy::Dirty);
     }
 
     #[tokio::test]

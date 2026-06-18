@@ -63,6 +63,7 @@ impl PostgresDependencyRuleRepository {
 
         Ok(DependencyRule {
             id: DependencyRuleId(row.get("id")),
+            organization_id: Some(OrganizationId::from_uuid(row.get("organization_id"))),
             source_type_id: AssetTypeId::from_uuid(row.get("source_type_id")),
             target_type_id: AssetTypeId::from_uuid(row.get("target_type_id")),
             relationship,
@@ -78,6 +79,11 @@ impl PostgresDependencyRuleRepository {
 #[async_trait]
 impl DependencyRuleRepository for PostgresDependencyRuleRepository {
     async fn create(&self, rule: &DependencyRule) -> Result<(), RepositoryError> {
+        let organization_id = rule.organization_id.ok_or_else(|| {
+            RepositoryError::ValidationError(
+                "DependencyRule.organization_id is required for Postgres persistence".to_string(),
+            )
+        })?;
         sqlx::query(
             r#"
             INSERT INTO dependency_rules (
@@ -89,7 +95,7 @@ impl DependencyRuleRepository for PostgresDependencyRuleRepository {
             "#,
         )
         .bind(rule.id.0)
-        .bind(Uuid::nil())
+        .bind(organization_id.0)
         .bind(rule.source_type_id.0)
         .bind(rule.target_type_id.0)
         .bind(rule.relationship.as_str())
@@ -110,7 +116,7 @@ impl DependencyRuleRepository for PostgresDependencyRuleRepository {
     ) -> Result<Vec<DependencyRule>, RepositoryError> {
         let rows = sqlx::query(
             r#"
-            SELECT id, source_type_id, target_type_id, relationship, is_transitive,
+            SELECT id, organization_id, source_type_id, target_type_id, relationship, is_transitive,
                 source_metadata_filter, target_metadata_filter, propagation_policy, created_at
             FROM dependency_rules
             WHERE source_type_id = $1
@@ -132,7 +138,7 @@ impl DependencyRuleRepository for PostgresDependencyRuleRepository {
     ) -> Result<Vec<DependencyRule>, RepositoryError> {
         let rows = sqlx::query(
             r#"
-            SELECT id, source_type_id, target_type_id, relationship, is_transitive,
+            SELECT id, organization_id, source_type_id, target_type_id, relationship, is_transitive,
                 source_metadata_filter, target_metadata_filter, propagation_policy, created_at
             FROM dependency_rules
             WHERE target_type_id = $1
@@ -164,7 +170,7 @@ impl DependencyRuleRepository for PostgresDependencyRuleRepository {
     ) -> Result<Vec<DependencyRule>, RepositoryError> {
         let rows = sqlx::query(
             r#"
-            SELECT id, source_type_id, target_type_id, relationship, is_transitive,
+            SELECT id, organization_id, source_type_id, target_type_id, relationship, is_transitive,
                 source_metadata_filter, target_metadata_filter, propagation_policy, created_at
             FROM dependency_rules
             WHERE source_type_id = $1 AND target_type_id = $2

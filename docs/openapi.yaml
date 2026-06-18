@@ -475,6 +475,36 @@ components:
           format: uuid
         version:
           type: string
+          description: Version constraint or baseline version, e.g. "^1.0.0" or "1.0.0"
+        relationship:
+          type: string
+          nullable: true
+          enum:
+            - depends_on
+            - references
+            - implements
+            - fixes
+            - verifies
+            - executes
+            - produces
+            - blocks
+            - relates_to
+        propagation_policy:
+          type: string
+          nullable: true
+          enum:
+            - dirty
+            - context_only
+            - audit_only
+        upgrade_policy:
+          type: string
+          nullable: true
+          enum:
+            - auto_patch
+            - auto_minor
+            - notify
+            - manual
+            - pin
 
     PublishResponse:
       type: object

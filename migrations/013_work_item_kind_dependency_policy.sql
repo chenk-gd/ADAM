@@ -4,6 +4,8 @@
 -- dependency records. This migration is intentionally additive because 012 may
 -- already have been applied in existing environments.
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 -- Dependency rule policy metadata
 ALTER TABLE dependency_rules
 ADD COLUMN IF NOT EXISTS source_metadata_filter JSONB,
@@ -127,7 +129,7 @@ SET metadata_schema = jsonb_set(
         jsonb_set(
             metadata_schema,
             '{properties,work_item_kind}',
-            '{"type":"string","enum":["feature","bugfix","test_execution","refactor","maintenance","release"]}'::JSONB,
+            '{"type":"string","enum":["feature","bugfix","test_execution"]}'::JSONB,
             true
         ),
         '{required}',
@@ -152,7 +154,7 @@ INSERT INTO dependency_rules (
     created_at
 )
 SELECT
-    '13131313-0000-4000-8000-000000000001'::UUID,
+    gen_random_uuid(),
     org.id,
     source_type.id,
     target_type.id,
@@ -188,7 +190,7 @@ INSERT INTO dependency_rules (
     created_at
 )
 SELECT
-    '13131313-0000-4000-8000-000000000002'::UUID,
+    gen_random_uuid(),
     org.id,
     source_type.id,
     target_type.id,
@@ -224,7 +226,7 @@ INSERT INTO dependency_rules (
     created_at
 )
 SELECT
-    '13131313-0000-4000-8000-000000000003'::UUID,
+    gen_random_uuid(),
     org.id,
     source_type.id,
     target_type.id,
@@ -260,7 +262,7 @@ INSERT INTO dependency_rules (
     created_at
 )
 SELECT
-    '13131313-0000-4000-8000-000000000004'::UUID,
+    gen_random_uuid(),
     org.id,
     source_type.id,
     target_type.id,
@@ -296,7 +298,7 @@ INSERT INTO dependency_rules (
     created_at
 )
 SELECT
-    '13131313-0000-4000-8000-000000000005'::UUID,
+    gen_random_uuid(),
     org.id,
     source_type.id,
     target_type.id,

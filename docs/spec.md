@@ -102,7 +102,8 @@
 **优先级**: 中  
 **详细说明**:
 - `work_item_kind` 是存储在 `metadata.work_item_kind` 中的元数据字段，用于区分工作项子类型
-- 支持的子类型：`feature`, `bugfix`, `test_execution`, `refactor`, `release`, `maintenance`
+- 当前内置规则支持的首批子类型：`feature`, `bugfix`, `test_execution`
+- 后续可扩展子类型：`refactor`, `release`, `maintenance`
 - 子类型不作为独立资产类型，而是统一通过元数据字段区分
 
 #### FR-002: 资产类型元数据
@@ -868,10 +869,14 @@ GET /api/v1/assets/search?project_id=proj-123&keyword=登录功能&type=requirem
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | id | UUID | 主键 |
+| organization_id | UUID | 所属组织ID |
 | source_type_id | UUID | 依赖方资产类型ID |
 | target_type_id | UUID | 被依赖方资产类型ID |
-| relationship | Enum | 关系类型：depends_on, references |
+| relationship | Enum | 关系类型：depends_on, references, implements, fixes, verifies, executes, produces, blocks, relates_to |
 | is_transitive | Boolean | 是否用于传递查询和上下文推导，不影响 Dirty 传播范围 |
+| source_metadata_filter | JSON | 依赖方元数据精确匹配过滤条件，可为空 |
+| target_metadata_filter | JSON | 被依赖方元数据精确匹配过滤条件，可为空 |
+| propagation_policy | Enum | 传播策略：dirty, context_only, audit_only |
 | created_at | Timestamp | 创建时间 |
 
 #### 5.2.3 AssetInstance（资产实例）

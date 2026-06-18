@@ -86,7 +86,10 @@ Publish request:
   "dependencies": [
     {
       "upstream_asset_id": "770e8400-e29b-41d4-a716-446655440002",
-      "version": "1.1.0"
+      "version": "^1.1.0",
+      "relationship": "implements",
+      "propagation_policy": "dirty",
+      "upgrade_policy": "notify"
     }
   ]
 }

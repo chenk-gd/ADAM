@@ -1,6 +1,6 @@
 //! Dependency rules between asset types
 
-use crate::asset::instance::AssetTypeId;
+use crate::asset::instance::{AssetTypeId, OrganizationId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -169,6 +169,9 @@ impl FromStr for PropagationPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DependencyRule {
     pub id: DependencyRuleId,
+    /// Owning organization for persisted rules. Optional for legacy serialized rules and tests.
+    #[serde(default)]
+    pub organization_id: Option<OrganizationId>,
     pub source_type_id: AssetTypeId, // downstream/dependent type
     pub target_type_id: AssetTypeId, // upstream/dependency type
     pub relationship: RelationshipType,
@@ -195,6 +198,7 @@ impl DependencyRule {
     ) -> Self {
         Self {
             id: DependencyRuleId::new(),
+            organization_id: None,
             source_type_id,
             target_type_id,
             relationship,
@@ -240,6 +244,12 @@ impl DependencyRule {
             .map(|o| o.len())
             .unwrap_or(0);
         source_keys + target_keys
+    }
+
+    /// Builder: set owning organization for persisted rules.
+    pub fn with_organization_id(mut self, organization_id: OrganizationId) -> Self {
+        self.organization_id = Some(organization_id);
+        self
     }
 
     /// Builder: set source metadata filter.
