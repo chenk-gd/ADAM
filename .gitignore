@@ -53,6 +53,7 @@ docs/.claude
 docs/.obsidian
 docs/.claudian
 .gitnexus
+.codegraph/
 
 # Session/context files
 CONTEXT.md
