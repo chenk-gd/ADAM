@@ -7,6 +7,7 @@ pub mod major_upgrade;
 pub mod state_propagator;
 pub mod unpublish;
 pub mod version_service;
+pub mod workflow;
 
 pub use asset_lifecycle::{
     AssetLifecycleError, AssetLifecycleService, IdempotentAssetLifecycleService,

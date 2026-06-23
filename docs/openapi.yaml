@@ -292,6 +292,157 @@ paths:
               schema:
                 $ref: "#/components/schemas/DependencyGraphResponse"
 
+  /api/workflow/events:
+    get:
+      operationId: listWorkflowEvents
+      tags: [Workflow]
+      parameters:
+        - name: correlation_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: asset_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: List of workflow events
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/WorkflowEvent" }
+    post:
+      operationId: postWorkflowEvent
+      tags: [Workflow]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateWorkflowEventRequest" }
+      responses:
+        "201":
+          description: Event appended and rules evaluated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedActionsResponse" }
+
+  /api/workflow/instances/{workflow_instance_id}:
+    get:
+      operationId: getWorkflowInstance
+      tags: [Workflow]
+      parameters:
+        - name: workflow_instance_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Workflow instance
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkflowInstance" }
+        "404":
+          description: Instance not found
+
+  /api/workflow/actions:
+    get:
+      operationId: listWorkflowActions
+      tags: [Workflow]
+      parameters:
+        - name: target_asset_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: List of active workflow actions
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/WorkflowAction" }
+
+  /api/agent-tasks:
+    get:
+      operationId: listAgentTasks
+      tags: [AgentTasks]
+      parameters:
+        - name: project_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: capability
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Agent tasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AgentTask" }
+
+  /api/agent-tasks/{task_id}/claim:
+    post:
+      operationId: claimAgentTask
+      tags: [AgentTasks]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClaimAgentTaskRequest" }
+      responses:
+        "200":
+          description: Claimed task, or null if it was not queued
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/AgentTask"
+                  - type: "null"
+        "404":
+          description: Task not found
+
+  /api/agent-tasks/{task_id}/result:
+    post:
+      operationId: submitAgentTaskResult
+      tags: [AgentTasks]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SubmitAgentTaskResultRequest" }
+      responses:
+        "200":
+          description: Completed task
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentTask" }
+        "404":
+          description: Task not found
+        "409":
+          description: Task state conflict
+
 components:
   parameters:
     AssetId:
@@ -626,6 +777,159 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AssetDependencyResponse"
+
+    CreateWorkflowEventRequest:
+      type: object
+      required: [event_type, source_asset_id, source_asset_type_id, payload]
+      properties:
+        event_type: { type: string }
+        source_asset_id: { type: string, format: uuid }
+        source_asset_type_id: { type: string, format: uuid }
+        project_id:
+          type: string
+          format: uuid
+          nullable: true
+        correlation_id:
+          type: string
+          format: uuid
+          nullable: true
+        payload: {}
+        cascade_depth:
+          type: integer
+          nullable: true
+
+    WorkflowEvent:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        project_id:
+          type: string
+          format: uuid
+          nullable: true
+        correlation_id: { type: string, format: uuid }
+        event_type: { type: string }
+        source_asset_id: { type: string, format: uuid }
+        source_asset_type_id: { type: string, format: uuid }
+        payload: {}
+        cascade_depth: { type: integer }
+        triggering_action_id:
+          type: string
+          format: uuid
+          nullable: true
+        idempotency_key: { type: string }
+        created_at: { type: string, format: date-time }
+
+    WorkflowInstance:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        project_id:
+          type: string
+          format: uuid
+          nullable: true
+        correlation_id: { type: string, format: uuid }
+        template: { type: string }
+        status: { type: string }
+        cascade_depth: { type: integer }
+        lock_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    WorkflowAction:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        instance_id: { type: string, format: uuid }
+        action_type: { type: string }
+        target_asset_id:
+          type: string
+          format: uuid
+          nullable: true
+        target_asset_type_id:
+          type: string
+          format: uuid
+          nullable: true
+        status: { type: string }
+        lock_version: { type: integer, format: int64 }
+        idempotency_key: { type: string }
+        automation_level: { type: string }
+        is_required: { type: boolean }
+        order_index: { type: integer }
+        retry_count: { type: integer }
+        max_retries: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CreatedActionsResponse:
+      type: object
+      properties:
+        event:
+          $ref: "#/components/schemas/WorkflowEvent"
+        created_action_ids:
+          type: array
+          items: { type: string, format: uuid }
+        cascade_exceeded:
+          type: array
+          items:
+            type: object
+            properties:
+              rule_id: { type: string, format: uuid }
+              depth: { type: integer }
+              max: { type: integer }
+
+    AgentTask:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        project_id:
+          type: string
+          format: uuid
+          nullable: true
+        action_id: { type: string, format: uuid }
+        capability: { type: string }
+        status: { type: string }
+        agent_id:
+          type: string
+          nullable: true
+        claimed_at:
+          type: string
+          format: date-time
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        result_payload:
+          nullable: true
+        produced_asset_ids:
+          type: array
+          items: { type: string, format: uuid }
+        lock_version: { type: integer, format: int64 }
+        idempotency_key: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ClaimAgentTaskRequest:
+      type: object
+      required: [agent_id]
+      properties:
+        agent_id: { type: string }
+        lease_seconds:
+          type: integer
+          nullable: true
+
+    SubmitAgentTaskResultRequest:
+      type: object
+      required: [result_payload]
+      properties:
+        result_payload: {}
+        produced_asset_ids:
+          type: array
+          items: { type: string, format: uuid }
 
     HealthResponse:
       type: object

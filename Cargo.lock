@@ -41,6 +41,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-test",
+ "tracing",
  "uuid",
 ]
 
@@ -87,6 +88,7 @@ dependencies = [
  "adam-infrastructure",
  "anyhow",
  "axum",
+ "chrono",
  "clap",
  "config",
  "rmcp",

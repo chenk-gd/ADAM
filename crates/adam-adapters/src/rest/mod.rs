@@ -1,5 +1,7 @@
 //! ADAM REST API handlers and routing
 
+pub mod workflow;
+
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -20,6 +22,10 @@ use adam_application::services::{
     AssetService, AssetServiceError, ManualCleanCommand, ManualCleanResolution,
     PublishAssetCommand, PublishDependency, VersionService, VersionServiceError,
     state_propagator::StatePropagationError,
+};
+use adam_domain::workflow::repository::{
+    AgentTaskRepository, PromotionRuleRepository, WorkflowActionRepository,
+    WorkflowEventRepository, WorkflowInstanceRepository,
 };
 use adam_domain::{
     AssetDependencyRecord, AssetId, AssetInstance, AssetRepository, AssetState, AssetTypeId,
@@ -579,6 +585,12 @@ pub struct AppState {
     pub dirty_repo: Arc<dyn DirtyQueueRepository>,
     pub version_repo: Arc<dyn AssetVersionRepository>,
     pub dirty_log_repo: Arc<dyn DirtyResolutionLogRepository>,
+    /// Workflow automation repositories (Slice 1).
+    pub workflow_event_repo: Arc<dyn WorkflowEventRepository>,
+    pub workflow_rule_repo: Arc<dyn PromotionRuleRepository>,
+    pub workflow_instance_repo: Arc<dyn WorkflowInstanceRepository>,
+    pub workflow_action_repo: Arc<dyn WorkflowActionRepository>,
+    pub agent_task_repo: Arc<dyn AgentTaskRepository>,
 }
 
 // ============================================================================
@@ -1345,6 +1357,25 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/v1/asset-types",
             post(create_asset_type).get(list_asset_types),
+        )
+        // Workflow automation routes (Slice 1, design §13)
+        .route(
+            "/api/workflow/events",
+            get(workflow::list_events).post(workflow::post_event),
+        )
+        .route(
+            "/api/workflow/instances/{workflow_instance_id}",
+            get(workflow::get_instance),
+        )
+        .route("/api/workflow/actions", get(workflow::list_actions))
+        .route("/api/agent-tasks", get(workflow::list_agent_tasks))
+        .route(
+            "/api/agent-tasks/{task_id}/claim",
+            post(workflow::claim_agent_task),
+        )
+        .route(
+            "/api/agent-tasks/{task_id}/result",
+            post(workflow::submit_agent_task_result),
         );
 
     // Public routes (if any) would go here
@@ -1403,6 +1434,11 @@ mod tests {
     use tower::ServiceExt;
 
     fn create_test_state() -> AppState {
+        use adam_domain::workflow::in_memory::{
+            InMemoryAgentTaskRepository, InMemoryPromotionRuleRepository,
+            InMemoryWorkflowActionRepository, InMemoryWorkflowEventRepository,
+            InMemoryWorkflowInstanceRepository,
+        };
         AppState {
             asset_repo: Arc::new(adam_domain::InMemoryAssetRepository::new()),
             asset_type_repo: Arc::new(adam_domain::InMemoryAssetTypeRepository::new()),
@@ -1411,6 +1447,11 @@ mod tests {
             dirty_repo: Arc::new(adam_domain::InMemoryDirtyQueueRepository::new()),
             version_repo: Arc::new(adam_domain::InMemoryAssetVersionRepository::new()),
             dirty_log_repo: Arc::new(adam_domain::InMemoryDirtyResolutionLogRepository::new()),
+            workflow_event_repo: Arc::new(InMemoryWorkflowEventRepository::default()),
+            workflow_rule_repo: Arc::new(InMemoryPromotionRuleRepository::default()),
+            workflow_instance_repo: Arc::new(InMemoryWorkflowInstanceRepository::default()),
+            workflow_action_repo: Arc::new(InMemoryWorkflowActionRepository::default()),
+            agent_task_repo: Arc::new(InMemoryAgentTaskRepository::default()),
         }
     }
 
@@ -2567,5 +2608,204 @@ mod tests {
 
         // Cross-org access denied even for OrgAdmin
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Slice 1 E2E: POST an `asset_published` event → a promotion rule creates an
+    /// `upsert_work_item` action → replay reuses it. Covers design §16 Slice 1
+    /// acceptance criteria 2, 3, 4, 5.
+    #[tokio::test]
+    async fn post_workflow_event_creates_work_item_action() {
+        use adam_domain::workflow::event::EventType;
+        use adam_domain::workflow::in_memory::InMemoryPromotionRuleRepository;
+        use adam_domain::workflow::repository::PromotionRuleRepository;
+        use adam_domain::workflow::rule::{
+            ActionTemplate, ActionType, AutomationLevel, PromotionRule, PromotionRuleId, RuleScope,
+        };
+
+        let org_id = Uuid::new_v4();
+        let source_asset_id = Uuid::new_v4();
+        let source_asset_type_id = Uuid::new_v4();
+
+        // Seed the promotion rule (mirrors migration 014 seed).
+        let rule_repo = Arc::new(InMemoryPromotionRuleRepository::default());
+        let now = chrono::Utc::now();
+        rule_repo
+            .create(&PromotionRule {
+                id: PromotionRuleId::new(),
+                organization_id: adam_domain::OrganizationId::from_uuid(org_id),
+                scope: RuleScope::Organization,
+                scope_ref: None,
+                event_type: EventType::AssetPublished,
+                source_asset_type_id: Some(adam_domain::AssetTypeId::from_uuid(
+                    source_asset_type_id,
+                )),
+                mutex_group: None,
+                rule_version: 1,
+                priority: 0,
+                automation_level: AutomationLevel::Automatic,
+                filters: serde_json::json!({}),
+                preconditions: serde_json::json!([]),
+                action_template: ActionTemplate {
+                    action_type: ActionType::UpsertWorkItem,
+                    payload: serde_json::json!({"work_item_kind":"feature"}),
+                    is_required: true,
+                    order_index: 0,
+                },
+                max_cascade_depth: 5,
+                effective_from: None,
+                effective_to: None,
+                rollout_segment: 100,
+                enabled: true,
+                dry_run: false,
+                audit_only: false,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        // Build an AppState sharing the seeded rule repo and the same action/
+        // instance repos across both requests (so replay reuse is observable).
+        let base = create_test_state();
+        let shared_event_repo = base.workflow_event_repo.clone();
+        let shared_action_repo = base.workflow_action_repo.clone();
+        let shared_instance_repo = base.workflow_instance_repo.clone();
+        let make_state = || AppState {
+            workflow_rule_repo: rule_repo.clone(),
+            workflow_event_repo: shared_event_repo.clone(),
+            workflow_action_repo: shared_action_repo.clone(),
+            workflow_instance_repo: shared_instance_repo.clone(),
+            ..base.clone()
+        };
+        let (auth_header, auth_value) = test_auth_header(org_id, "agent-1", &[Role::AiAgent], &[]);
+
+        let event_body = serde_json::json!({
+            "event_type": "asset_published",
+            "source_asset_id": source_asset_id,
+            "source_asset_type_id": source_asset_type_id,
+            "payload": { "version": "1.0.0" },
+            "cascade_depth": 0
+        })
+        .to_string();
+
+        // First append → one action created.
+        let app = create_router(make_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/workflow/events")
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "req-token-1")
+                    .header(&auth_header, &auth_value)
+                    .body(Body::from(event_body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: workflow::CreatedActionsDto = serde_json::from_slice(&body).unwrap();
+        assert_eq!(created.created_action_ids.len(), 1, "one action created");
+        assert!(created.cascade_exceeded.is_empty());
+        let first_action_id = created.created_action_ids[0];
+        let correlation_id = created.event.correlation_id;
+
+        // Replay the same event → same action reused, no duplicate (criterion 2).
+        let app = create_router(make_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/workflow/events")
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "req-token-1")
+                    .header(&auth_header, &auth_value)
+                    .body(Body::from(event_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let replayed: workflow::CreatedActionsDto = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            replayed.created_action_ids,
+            vec![first_action_id],
+            "replay must reuse the same action"
+        );
+
+        // The event is retrievable by correlation id (criterion 4).
+        let app = create_router(make_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/workflow/events?correlation_id={correlation_id}"
+                    ))
+                    .header(&auth_header, &auth_value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let events: Vec<workflow::WorkflowEventDto> = serde_json::from_slice(&body).unwrap();
+        assert!(events.iter().any(|e| e.correlation_id == correlation_id));
+    }
+
+    /// Slice 1 P1 fix: an instance in another org must not be readable — GET
+    /// returns 404 rather than leaking cross-org workflow state.
+    #[tokio::test]
+    async fn get_workflow_instance_cross_org_returns_404() {
+        use adam_domain::workflow::in_memory::InMemoryWorkflowInstanceRepository;
+        use adam_domain::workflow::instance::CreateInstanceCommand;
+        use adam_domain::workflow::repository::WorkflowInstanceRepository;
+
+        let other_org = Uuid::new_v4();
+        let instance_repo = Arc::new(InMemoryWorkflowInstanceRepository::default());
+        let instance = instance_repo
+            .create(&CreateInstanceCommand {
+                organization_id: adam_domain::OrganizationId::from_uuid(other_org),
+                project_id: None,
+                correlation_id: adam_domain::workflow::CorrelationId::new(),
+                template: adam_domain::workflow::instance::WorkflowTemplate::Feature,
+                cascade_depth: 0,
+            })
+            .await
+            .unwrap();
+
+        let base = create_test_state();
+        let state = AppState {
+            workflow_instance_repo: instance_repo,
+            ..base
+        };
+        let app = create_router(state);
+
+        // Caller is in a different org.
+        let caller_org = Uuid::new_v4();
+        let (auth_header, auth_value) =
+            test_auth_header(caller_org, "user-2", &[Role::Developer], &[]);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/workflow/instances/{}", instance.id.0))
+                    .header(&auth_header, &auth_value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

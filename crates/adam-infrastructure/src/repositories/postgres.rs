@@ -1704,7 +1704,6 @@ impl UnitOfWork for PostgresUnitOfWork {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod tests {
     #[test]
     fn asset_version_sql_uses_instance_id_column() {

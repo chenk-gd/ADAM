@@ -312,7 +312,7 @@ mod tests {
             id: "user-123".to_string(),
             organization_id: OrganizationId::new(),
             roles: vec![Role::Developer],
-            project_memberships: vec![project_1.clone()],
+            project_memberships: vec![project_1],
         };
 
         // Check membership
@@ -328,7 +328,7 @@ mod tests {
             id: "user-123".to_string(),
             organization_id: OrganizationId::new(),
             roles: vec![Role::Developer],
-            project_memberships: vec![project_1.clone()],
+            project_memberships: vec![project_1],
         };
 
         // Developer has AssetCreate permission in member project
@@ -363,7 +363,7 @@ mod tests {
         let org_id = OrganizationId::new();
         let principal = AuthPrincipal {
             id: "admin".to_string(),
-            organization_id: org_id.clone(),
+            organization_id: org_id,
             roles: vec![Role::SystemAdmin],
             project_memberships: vec![], // Not a member of any project
         };
@@ -371,22 +371,14 @@ mod tests {
         // SystemAdmin can access any project in same org
         assert!(
             principal
-                .can(
-                    Permission::AssetCreate,
-                    org_id.clone(),
-                    Some(ProjectId::new())
-                )
+                .can(Permission::AssetCreate, org_id, Some(ProjectId::new()))
                 .is_ok()
         );
 
         // SystemAdmin can delete assets
         assert!(
             principal
-                .can(
-                    Permission::AssetDelete,
-                    org_id.clone(),
-                    Some(ProjectId::new())
-                )
+                .can(Permission::AssetDelete, org_id, Some(ProjectId::new()))
                 .is_ok()
         );
     }

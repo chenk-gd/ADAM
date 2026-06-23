@@ -7,6 +7,7 @@ pub mod idempotency;
 pub mod repository;
 pub mod version;
 pub mod virtual_instance;
+pub mod workflow;
 
 pub use asset::asset_type::{AssetType, VersionStrategy};
 pub use asset::instance::{AssetId, AssetInstance, AssetTypeId, OrganizationId, ProjectId};

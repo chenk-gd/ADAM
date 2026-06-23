@@ -5,6 +5,7 @@
 
 use adam_application::VersionService;
 use adam_application::services::version_service::ChangeType;
+use adam_application::services::workflow::AgentTaskService;
 use adam_application::services::{
     ManualCleanCommand, ManualCleanResolution, PublishAssetCommand, PublishDependency,
 };
@@ -17,6 +18,14 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Default agent-task lease duration (seconds) when the caller omits it.
+const DEFAULT_AGENT_TASK_LEASE_SECONDS: i64 = 900;
+
+use adam_domain::workflow::repository::{
+    AgentTaskRepository, PromotionRuleRepository, WorkflowActionRepository,
+    WorkflowEventRepository, WorkflowInstanceRepository,
+};
+use adam_domain::workflow::{AgentTaskId, Capability};
 use adam_domain::{
     AssetId, AssetInstance, AssetRepository, AssetTypeId, AssetVersionRepository, AuthPrincipal,
     AuthorizationError, AuthorizationService, DependencyRepository, DependencyRuleRepository,
@@ -38,6 +47,12 @@ pub struct McpServerState {
     pub version_repo: Arc<dyn AssetVersionRepository>,
     pub dirty_log_repo: Arc<dyn DirtyResolutionLogRepository>,
     pub virtual_repo: Arc<dyn VirtualInstanceRepository>,
+    /// Workflow automation repositories (Slice 1)
+    pub workflow_event_repo: Arc<dyn WorkflowEventRepository>,
+    pub workflow_rule_repo: Arc<dyn PromotionRuleRepository>,
+    pub workflow_instance_repo: Arc<dyn WorkflowInstanceRepository>,
+    pub workflow_action_repo: Arc<dyn WorkflowActionRepository>,
+    pub agent_task_repo: Arc<dyn AgentTaskRepository>,
     /// Session authentication principal
     pub principal: AuthPrincipal,
 }
@@ -329,6 +344,83 @@ pub struct ManualCleanAssetResponse {
     pub previous_state: String,
     pub current_state: String,
     pub review_id: String,
+}
+
+/// Request for the `query_workflow_state` tool (Slice 1, design §14).
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct QueryWorkflowStateRequest {
+    /// Workflow instance id to inspect.
+    pub workflow_instance_id: String,
+}
+
+/// Response for the `query_workflow_state` tool.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct QueryWorkflowStateResponse {
+    pub instance_id: String,
+    pub status: String,
+    pub template: String,
+    pub correlation_id: String,
+    pub cascade_depth: i32,
+    pub actions: Vec<WorkflowActionInfo>,
+}
+
+/// Minimal action info returned by `query_workflow_state`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowActionInfo {
+    pub id: String,
+    pub action_type: String,
+    pub status: String,
+    pub target_asset_id: Option<String>,
+    pub automation_level: String,
+}
+
+/// Request for pending task listing (Slice 2, design §14).
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ListPendingAgentTasksRequest {
+    pub project_id: Option<String>,
+    pub capability_filter: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AgentTaskInfo {
+    pub id: String,
+    pub project_id: Option<String>,
+    pub action_id: String,
+    pub capability: String,
+    pub status: String,
+    pub agent_id: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ListPendingAgentTasksResponse {
+    pub tasks: Vec<AgentTaskInfo>,
+    pub total: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ClaimAgentTaskRequest {
+    pub task_id: String,
+    pub agent_id: String,
+    pub lease_seconds: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ClaimAgentTaskResponse {
+    pub task: Option<AgentTaskInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SubmitAgentTaskResultRequest {
+    pub task_id: String,
+    pub result_payload: serde_json::Value,
+    #[serde(default)]
+    pub produced_asset_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SubmitAgentTaskResultResponse {
+    pub task: AgentTaskInfo,
 }
 
 // ============================================================================
@@ -1276,6 +1368,247 @@ impl AdamMcpServer {
             ))])),
         }
     }
+
+    /// Query the state of a workflow instance and its actions (Slice 1, §14).
+    async fn query_workflow_state(
+        &self,
+        request: QueryWorkflowStateRequest,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let instance_id = match parse_uuid(&request.workflow_instance_id) {
+            Some(id) => adam_domain::workflow::instance::WorkflowInstanceId::from_uuid(id),
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid workflow_instance_id format",
+                )]));
+            }
+        };
+
+        let instance = match self
+            .state
+            .workflow_instance_repo
+            .find_by_id(&instance_id)
+            .await
+        {
+            Ok(Some(i)) => i,
+            Ok(None) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Workflow instance not found",
+                )]));
+            }
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(e.to_string())]));
+            }
+        };
+
+        // Enforce organization boundary: an instance in another org is treated
+        // as not-found so cross-org UUID guessing cannot leak workflow state.
+        if instance.organization_id != self.state.principal.organization_id {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Workflow instance not found",
+            )]));
+        }
+
+        let actions = match self
+            .state
+            .workflow_action_repo
+            .find_by_instance(&instance_id)
+            .await
+        {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(e.to_string())]));
+            }
+        };
+
+        let response = QueryWorkflowStateResponse {
+            instance_id: instance.id.0.to_string(),
+            status: instance.status.to_string(),
+            template: instance.template.to_string(),
+            correlation_id: instance.correlation_id.0.to_string(),
+            cascade_depth: instance.cascade_depth,
+            actions: actions
+                .into_iter()
+                .map(|a| WorkflowActionInfo {
+                    id: a.id.0.to_string(),
+                    action_type: a.action_type.to_string(),
+                    status: a.status.to_string(),
+                    target_asset_id: a.target_asset_id.map(|x| x.0.to_string()),
+                    automation_level: a.automation_level.as_str().to_string(),
+                })
+                .collect(),
+        };
+
+        match serde_json::to_string(&response) {
+            Ok(json) => Ok(CallToolResult::success(vec![Content::text(json)])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Serialization error: {e}"
+            ))])),
+        }
+    }
+
+    async fn list_pending_agent_tasks(
+        &self,
+        request: ListPendingAgentTasksRequest,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let project_id = match request.project_id.as_deref().map(parse_uuid) {
+            Some(Some(id)) => Some(ProjectId::from_uuid(id)),
+            Some(None) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid project_id format",
+                )]));
+            }
+            None => None,
+        };
+        let capability = request
+            .capability_filter
+            .as_deref()
+            .map(Capability::new)
+            .unwrap_or_else(Capability::create_virtual_asset_context);
+
+        let tasks = match self
+            .state
+            .agent_task_repo
+            .list_queued(
+                &self.state.principal.organization_id,
+                &capability,
+                project_id.as_ref(),
+            )
+            .await
+        {
+            Ok(tasks) => tasks,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        };
+
+        let response = ListPendingAgentTasksResponse {
+            total: tasks.len(),
+            tasks: tasks.into_iter().map(agent_task_info).collect(),
+        };
+        json_tool_response(&response)
+    }
+
+    async fn claim_agent_task(
+        &self,
+        request: ClaimAgentTaskRequest,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let task_id = match parse_uuid(&request.task_id) {
+            Some(id) => AgentTaskId::from_uuid(id),
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid task_id format",
+                )]));
+            }
+        };
+
+        let existing = match self.state.agent_task_repo.find_by_id(&task_id).await {
+            Ok(Some(task)) => task,
+            Ok(None) => return Ok(CallToolResult::error(vec![Content::text("Task not found")])),
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        };
+        if existing.organization_id != self.state.principal.organization_id {
+            return Ok(CallToolResult::error(vec![Content::text("Task not found")]));
+        }
+
+        let service = AgentTaskService::new(
+            self.state.agent_task_repo.clone(),
+            self.state.workflow_action_repo.clone(),
+            self.state.workflow_event_repo.clone(),
+            self.state.workflow_instance_repo.clone(),
+        );
+        let claimed = match service
+            .claim_task(
+                task_id,
+                &request.agent_id,
+                chrono::Duration::seconds(
+                    request
+                        .lease_seconds
+                        .unwrap_or(DEFAULT_AGENT_TASK_LEASE_SECONDS),
+                ),
+            )
+            .await
+        {
+            Ok(task) => task,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        };
+
+        json_tool_response(&ClaimAgentTaskResponse {
+            task: claimed.map(agent_task_info),
+        })
+    }
+
+    async fn submit_agent_task_result(
+        &self,
+        request: SubmitAgentTaskResultRequest,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let task_id = match parse_uuid(&request.task_id) {
+            Some(id) => AgentTaskId::from_uuid(id),
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid task_id format",
+                )]));
+            }
+        };
+        let produced_asset_ids = match request
+            .produced_asset_ids
+            .iter()
+            .map(|id| parse_uuid(id))
+            .collect::<Option<Vec<_>>>()
+        {
+            Some(ids) => ids,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid produced_asset_ids format",
+                )]));
+            }
+        };
+
+        let existing = match self.state.agent_task_repo.find_by_id(&task_id).await {
+            Ok(Some(task)) => task,
+            Ok(None) => return Ok(CallToolResult::error(vec![Content::text("Task not found")])),
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        };
+        if existing.organization_id != self.state.principal.organization_id {
+            return Ok(CallToolResult::error(vec![Content::text("Task not found")]));
+        }
+
+        let service = AgentTaskService::new(
+            self.state.agent_task_repo.clone(),
+            self.state.workflow_action_repo.clone(),
+            self.state.workflow_event_repo.clone(),
+            self.state.workflow_instance_repo.clone(),
+        );
+        let task = match service
+            .submit_result(task_id, request.result_payload, produced_asset_ids)
+            .await
+        {
+            Ok(task) => task,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        };
+
+        json_tool_response(&SubmitAgentTaskResultResponse {
+            task: agent_task_info(task),
+        })
+    }
+}
+
+fn agent_task_info(task: adam_domain::workflow::AgentTask) -> AgentTaskInfo {
+    AgentTaskInfo {
+        id: task.id.0.to_string(),
+        project_id: task.project_id.map(|p| p.0.to_string()),
+        action_id: task.action_id.0.to_string(),
+        capability: task.capability.0,
+        status: task.status.to_string(),
+        agent_id: task.agent_id,
+        expires_at: task.expires_at.map(|d| d.to_rfc3339()),
+    }
+}
+
+fn json_tool_response<T: Serialize>(response: &T) -> Result<CallToolResult, rmcp::Error> {
+    match serde_json::to_string(response) {
+        Ok(json) => Ok(CallToolResult::success(vec![Content::text(json)])),
+        Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+            "Serialization error: {e}"
+        ))])),
+    }
 }
 
 impl ServerHandler for AdamMcpServer {
@@ -1355,6 +1688,34 @@ impl ServerHandler for AdamMcpServer {
                 };
                 self.manual_clean_asset(params).await
             }
+            "query_workflow_state" => {
+                let params: QueryWorkflowStateRequest = match parse_args(request.arguments) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(e),
+                };
+                self.query_workflow_state(params).await
+            }
+            "list_pending_agent_tasks" => {
+                let params: ListPendingAgentTasksRequest = match parse_args(request.arguments) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(e),
+                };
+                self.list_pending_agent_tasks(params).await
+            }
+            "claim_agent_task" => {
+                let params: ClaimAgentTaskRequest = match parse_args(request.arguments) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(e),
+                };
+                self.claim_agent_task(params).await
+            }
+            "submit_agent_task_result" => {
+                let params: SubmitAgentTaskResultRequest = match parse_args(request.arguments) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(e),
+                };
+                self.submit_agent_task_result(params).await
+            }
             _ => {
                 let msg = format!("Unknown tool: {}", request.name);
                 Ok(CallToolResult::error(vec![Content::text(msg)]))
@@ -1417,6 +1778,26 @@ impl ServerHandler for AdamMcpServer {
         let clean_schema: serde_json::Map<String, serde_json::Value> =
             serde_json::from_value(schema_json).unwrap();
 
+        let schema = schemars::schema_for!(QueryWorkflowStateRequest);
+        let schema_json = serde_json::to_value(schema).unwrap();
+        let workflow_state_schema: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(schema_json).unwrap();
+
+        let schema = schemars::schema_for!(ListPendingAgentTasksRequest);
+        let schema_json = serde_json::to_value(schema).unwrap();
+        let list_agent_tasks_schema: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(schema_json).unwrap();
+
+        let schema = schemars::schema_for!(ClaimAgentTaskRequest);
+        let schema_json = serde_json::to_value(schema).unwrap();
+        let claim_agent_task_schema: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(schema_json).unwrap();
+
+        let schema = schemars::schema_for!(SubmitAgentTaskResultRequest);
+        let schema_json = serde_json::to_value(schema).unwrap();
+        let submit_agent_task_schema: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(schema_json).unwrap();
+
         let tools = vec![
             Tool::new(
                 "query_assets",
@@ -1467,6 +1848,26 @@ impl ServerHandler for AdamMcpServer {
                 "manual_clean_asset",
                 "Manually clean an asset after reviewing upstream changes",
                 Arc::new(clean_schema),
+            ),
+            Tool::new(
+                "query_workflow_state",
+                "Query the state of a workflow instance and its actions by workflow_instance_id",
+                Arc::new(workflow_state_schema),
+            ),
+            Tool::new(
+                "list_pending_agent_tasks",
+                "List queued agent tasks by optional project_id and capability_filter",
+                Arc::new(list_agent_tasks_schema),
+            ),
+            Tool::new(
+                "claim_agent_task",
+                "Atomically claim a queued agent task and set its lease",
+                Arc::new(claim_agent_task_schema),
+            ),
+            Tool::new(
+                "submit_agent_task_result",
+                "Submit an agent task result and complete the parent workflow action",
+                Arc::new(submit_agent_task_schema),
             ),
         ];
         Ok(rmcp::model::ListToolsResult {
@@ -1572,12 +1973,24 @@ fn matches_filters(asset: &AssetInstance, request: &QueryAssetsRequest) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use adam_application::services::workflow::AgentTaskService;
+    use adam_domain::workflow::action::CreateActionCommand;
+    use adam_domain::workflow::instance::{CreateInstanceCommand, WorkflowTemplate};
+    use adam_domain::workflow::repository::{WorkflowActionRepository, WorkflowInstanceRepository};
+    use adam_domain::workflow::rule::{ActionType, AutomationLevel};
+    use adam_domain::workflow::state_machine::{ActionStatus, InstanceStatus};
+    use adam_domain::workflow::{Capability, CompensationPolicy, CorrelationId};
     use adam_domain::{
         AssetState, CreateAssetCommand, InMemoryAssetRepository, InMemoryDirtyQueueRepository,
         InMemoryVirtualInstanceRepository, Role,
     };
 
     fn create_test_state_with_role(role: Role) -> McpServerState {
+        use adam_domain::workflow::in_memory::{
+            InMemoryAgentTaskRepository, InMemoryPromotionRuleRepository,
+            InMemoryWorkflowActionRepository, InMemoryWorkflowEventRepository,
+            InMemoryWorkflowInstanceRepository,
+        };
         let org_id = OrganizationId::new();
         let project_id = ProjectId::new();
 
@@ -1589,6 +2002,11 @@ mod tests {
             version_repo: Arc::new(adam_domain::InMemoryAssetVersionRepository::new()),
             dirty_log_repo: Arc::new(adam_domain::InMemoryDirtyResolutionLogRepository::new()),
             virtual_repo: Arc::new(InMemoryVirtualInstanceRepository::new()),
+            workflow_event_repo: Arc::new(InMemoryWorkflowEventRepository::default()),
+            workflow_rule_repo: Arc::new(InMemoryPromotionRuleRepository::default()),
+            workflow_instance_repo: Arc::new(InMemoryWorkflowInstanceRepository::default()),
+            workflow_action_repo: Arc::new(InMemoryWorkflowActionRepository::default()),
+            agent_task_repo: Arc::new(InMemoryAgentTaskRepository::default()),
             principal: AuthPrincipal {
                 id: "test-user".to_string(),
                 organization_id: org_id,
@@ -1600,6 +2018,65 @@ mod tests {
 
     fn create_test_state() -> McpServerState {
         create_test_state_with_role(Role::Developer)
+    }
+
+    async fn seed_ready_agent_task(state: &McpServerState) -> AgentTaskId {
+        let instance = state
+            .workflow_instance_repo
+            .create(&CreateInstanceCommand {
+                organization_id: state.principal.organization_id,
+                project_id: None,
+                correlation_id: CorrelationId::new(),
+                template: WorkflowTemplate::Feature,
+                cascade_depth: 0,
+            })
+            .await
+            .unwrap();
+        state
+            .workflow_instance_repo
+            .update_cas(&instance.id, instance.lock_version, InstanceStatus::Ready)
+            .await
+            .unwrap();
+
+        let action = state
+            .workflow_action_repo
+            .create(&CreateActionCommand {
+                organization_id: state.principal.organization_id,
+                instance_id: instance.id,
+                action_type: ActionType::UpsertWorkItem,
+                target_asset_id: Some(AssetId::new()),
+                target_asset_type_id: Some(AssetTypeId::new()),
+                idempotency_key: format!("action:{}", uuid::Uuid::new_v4()),
+                preconditions: serde_json::json!([]),
+                postconditions: serde_json::json!({}),
+                automation_level: AutomationLevel::AgentSuggested,
+                is_required: true,
+                order_index: 0,
+                compensation_action_type: None,
+                compensation_payload: None,
+                compensation_policy: CompensationPolicy::None,
+                max_retries: 3,
+            })
+            .await
+            .unwrap();
+        let mut ready = action.clone();
+        ready.status = ActionStatus::Ready;
+        state
+            .workflow_action_repo
+            .update_cas(&ready, action.lock_version)
+            .await
+            .unwrap();
+
+        AgentTaskService::new(
+            state.agent_task_repo.clone(),
+            state.workflow_action_repo.clone(),
+            state.workflow_event_repo.clone(),
+            state.workflow_instance_repo.clone(),
+        )
+        .create_task_for_action(action.id, Capability::create_virtual_asset_context())
+        .await
+        .unwrap()
+        .id
     }
 
     #[tokio::test]
@@ -2349,5 +2826,51 @@ mod tests {
         assert!(context.context_assets.iter().any(|asset| {
             asset.id == upstream.id.0.to_string() && asset.relevance == "upstream"
         }));
+    }
+
+    #[tokio::test]
+    async fn agent_task_tools_list_claim_and_submit_result() {
+        let state = create_test_state_with_role(Role::AiAgent);
+        let server = AdamMcpServer::new(state.clone());
+        let task_id = seed_ready_agent_task(&state).await;
+
+        let list_result = server
+            .list_pending_agent_tasks(ListPendingAgentTasksRequest {
+                project_id: None,
+                capability_filter: Some("create_virtual_asset_context".to_string()),
+            })
+            .await
+            .unwrap();
+        assert!(!list_result.is_error.unwrap_or(true));
+        let content_text = &list_result.content[0].as_text().unwrap().text;
+        let listed: ListPendingAgentTasksResponse = serde_json::from_str(content_text).unwrap();
+        assert_eq!(listed.total, 1);
+        assert_eq!(listed.tasks[0].id, task_id.0.to_string());
+
+        let claim_result = server
+            .claim_agent_task(ClaimAgentTaskRequest {
+                task_id: task_id.0.to_string(),
+                agent_id: "agent-1".to_string(),
+                lease_seconds: Some(60),
+            })
+            .await
+            .unwrap();
+        assert!(!claim_result.is_error.unwrap_or(true));
+        let content_text = &claim_result.content[0].as_text().unwrap().text;
+        let claimed: ClaimAgentTaskResponse = serde_json::from_str(content_text).unwrap();
+        assert_eq!(claimed.task.unwrap().status, "claimed");
+
+        let submit_result = server
+            .submit_agent_task_result(SubmitAgentTaskResultRequest {
+                task_id: task_id.0.to_string(),
+                result_payload: serde_json::json!({"ok": true}),
+                produced_asset_ids: vec![uuid::Uuid::new_v4().to_string()],
+            })
+            .await
+            .unwrap();
+        assert!(!submit_result.is_error.unwrap_or(true));
+        let content_text = &submit_result.content[0].as_text().unwrap().text;
+        let submitted: SubmitAgentTaskResultResponse = serde_json::from_str(content_text).unwrap();
+        assert_eq!(submitted.task.status, "succeeded");
     }
 }

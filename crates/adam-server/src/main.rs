@@ -5,6 +5,11 @@ use std::sync::Arc;
 
 use adam_adapters::mcp::{AdamMcpServer, McpServerState};
 use adam_adapters::rest::{self, AppState};
+use adam_application::services::workflow::AgentTaskService;
+use adam_domain::workflow::repository::{
+    AgentTaskRepository, PromotionRuleRepository, WorkflowActionRepository,
+    WorkflowEventRepository, WorkflowInstanceRepository,
+};
 use adam_domain::{
     AssetRepository, AssetTypeRepository, AssetVersionRepository, AuthPrincipal,
     DependencyRepository, DependencyRuleRepository, DirtyQueueRepository,
@@ -83,6 +88,12 @@ struct Repositories {
     version_repo: Arc<dyn AssetVersionRepository>,
     dirty_log_repo: Arc<dyn DirtyResolutionLogRepository>,
     virtual_repo: Arc<dyn VirtualInstanceRepository>,
+    // Workflow automation repositories (Slice 1)
+    workflow_event_repo: Arc<dyn WorkflowEventRepository>,
+    workflow_rule_repo: Arc<dyn PromotionRuleRepository>,
+    workflow_instance_repo: Arc<dyn WorkflowInstanceRepository>,
+    workflow_action_repo: Arc<dyn WorkflowActionRepository>,
+    agent_task_repo: Arc<dyn AgentTaskRepository>,
 }
 
 impl Repositories {
@@ -99,6 +110,11 @@ impl Repositories {
     }
 
     fn memory() -> Self {
+        use adam_domain::workflow::in_memory::{
+            InMemoryAgentTaskRepository, InMemoryPromotionRuleRepository,
+            InMemoryWorkflowActionRepository, InMemoryWorkflowEventRepository,
+            InMemoryWorkflowInstanceRepository,
+        };
         Self {
             asset_repo: Arc::new(adam_domain::InMemoryAssetRepository::new()),
             asset_type_repo: Arc::new(adam_domain::InMemoryAssetTypeRepository::new()),
@@ -108,6 +124,11 @@ impl Repositories {
             version_repo: Arc::new(adam_domain::InMemoryAssetVersionRepository::new()),
             dirty_log_repo: Arc::new(adam_domain::InMemoryDirtyResolutionLogRepository::new()),
             virtual_repo: Arc::new(adam_domain::InMemoryVirtualInstanceRepository::new()),
+            workflow_event_repo: Arc::new(InMemoryWorkflowEventRepository::default()),
+            workflow_rule_repo: Arc::new(InMemoryPromotionRuleRepository::default()),
+            workflow_instance_repo: Arc::new(InMemoryWorkflowInstanceRepository::default()),
+            workflow_action_repo: Arc::new(InMemoryWorkflowActionRepository::default()),
+            agent_task_repo: Arc::new(InMemoryAgentTaskRepository::default()),
         }
     }
 
@@ -146,7 +167,32 @@ impl Repositories {
                 ),
             ),
             virtual_repo: Arc::new(
-                adam_infrastructure::repositories::PostgresVirtualInstanceRepository::new(pool),
+                adam_infrastructure::repositories::PostgresVirtualInstanceRepository::new(
+                    pool.clone(),
+                ),
+            ),
+            workflow_event_repo: Arc::new(
+                adam_infrastructure::repositories::PostgresWorkflowEventRepository::new(
+                    pool.clone(),
+                ),
+            ),
+            workflow_rule_repo: Arc::new(
+                adam_infrastructure::repositories::PostgresPromotionRuleRepository::new(
+                    pool.clone(),
+                ),
+            ),
+            workflow_instance_repo: Arc::new(
+                adam_infrastructure::repositories::PostgresWorkflowInstanceRepository::new(
+                    pool.clone(),
+                ),
+            ),
+            workflow_action_repo: Arc::new(
+                adam_infrastructure::repositories::PostgresWorkflowActionRepository::new(
+                    pool.clone(),
+                ),
+            ),
+            agent_task_repo: Arc::new(
+                adam_infrastructure::repositories::PostgresAgentTaskRepository::new(pool),
             ),
         })
     }
@@ -160,6 +206,11 @@ impl Repositories {
             dirty_repo: self.dirty_repo.clone(),
             version_repo: self.version_repo.clone(),
             dirty_log_repo: self.dirty_log_repo.clone(),
+            workflow_event_repo: self.workflow_event_repo.clone(),
+            workflow_rule_repo: self.workflow_rule_repo.clone(),
+            workflow_instance_repo: self.workflow_instance_repo.clone(),
+            workflow_action_repo: self.workflow_action_repo.clone(),
+            agent_task_repo: self.agent_task_repo.clone(),
         }
     }
 
@@ -172,6 +223,11 @@ impl Repositories {
             version_repo: self.version_repo.clone(),
             dirty_log_repo: self.dirty_log_repo.clone(),
             virtual_repo: self.virtual_repo.clone(),
+            workflow_event_repo: self.workflow_event_repo.clone(),
+            workflow_rule_repo: self.workflow_rule_repo.clone(),
+            workflow_instance_repo: self.workflow_instance_repo.clone(),
+            workflow_action_repo: self.workflow_action_repo.clone(),
+            agent_task_repo: self.agent_task_repo.clone(),
             principal,
         }
     }
@@ -216,10 +272,46 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run_rest_server(app_state: AppState, rest_addr: SocketAddr) -> anyhow::Result<()> {
     tracing::info!("ADAM REST API starting on {}", rest_addr);
+    spawn_agent_task_expiry_worker(app_state.clone());
     let rest_app = rest::create_router(app_state);
     let listener = tokio::net::TcpListener::bind(rest_addr).await?;
     axum::serve(listener, rest_app).await?;
     Ok(())
+}
+
+fn spawn_agent_task_expiry_worker(app_state: AppState) {
+    let interval_seconds = std::env::var("ADAM_AGENT_TASK_EXPIRY_INTERVAL_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(60);
+
+    if interval_seconds == 0 {
+        tracing::info!("Agent task expiry worker disabled");
+        return;
+    }
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_seconds));
+        // If a scan overruns the interval, skip the missed ticks instead of
+        // burst-firing a backlog of scans back-to-back.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let service = AgentTaskService::new(
+                app_state.agent_task_repo.clone(),
+                app_state.workflow_action_repo.clone(),
+                app_state.workflow_event_repo.clone(),
+                app_state.workflow_instance_repo.clone(),
+            );
+            match service.timeout_expired(chrono::Utc::now()).await {
+                Ok(expired) if !expired.is_empty() => {
+                    tracing::info!(expired = expired.len(), "Expired agent tasks");
+                }
+                Ok(_) => {}
+                Err(err) => tracing::warn!(error = %err, "Agent task expiry scan failed"),
+            }
+        }
+    });
 }
 
 async fn run_mcp_server(server: AdamMcpServer) -> anyhow::Result<()> {

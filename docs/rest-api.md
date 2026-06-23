@@ -133,6 +133,56 @@ Manual clean updates effective dependency baselines, resolves matching dirty que
 
 Dependency records include declared and effective versions plus effective baseline audit fields.
 
+## Workflow Automation
+
+> Slice 1/2 (Event → Action core, AgentTask claim/result). See `docs/plans/2026-06-18-workflow-automation-implementation-plan.md`.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/workflow/events?correlation_id={uuid}` | List events by correlation id (or `asset_id={uuid}` for an asset's events). |
+| `POST` | `/api/workflow/events` | Append an event idempotently and evaluate promotion rules to create actions. Requires an `Idempotency-Key` header. |
+| `GET` | `/api/workflow/instances/{workflow_instance_id}` | Read one workflow instance (Saga coordinator). |
+| `GET` | `/api/workflow/actions?target_asset_id={uuid}` | List active (non-terminal) actions targeting an asset; optional `status` filter. |
+| `GET` | `/api/agent-tasks?status=queued&capability=create_virtual_asset_context` | List agent tasks in the caller's organization; optional `project_id`, `status`, and `capability` filters. |
+| `POST` | `/api/agent-tasks/{task_id}/claim` | Atomically claim a queued task and set a lease. Returns `null` when another agent already claimed it. |
+| `POST` | `/api/agent-tasks/{task_id}/result` | Store the task result, link produced assets, and complete the parent workflow action. |
+
+`POST /api/workflow/events` request:
+
+```json
+{
+  "event_type": "asset_published",
+  "source_asset_id": "<requirement asset id>",
+  "source_asset_type_id": "<requirement asset type id>",
+  "project_id": "<optional project id>",
+  "correlation_id": "<optional; generated if omitted>",
+  "payload": { "version": "1.0.0" },
+  "cascade_depth": 0
+}
+```
+
+The response echoes the stored event plus `created_action_ids` (workflow actions created/reused by winning rules) and any `cascade_exceeded` violations. Replaying the same event (same `event_type`, `source_asset_id`, and `Idempotency-Key`) returns the same event and reuses the same actions — no duplicates.
+
+`POST /api/agent-tasks/{task_id}/claim` request:
+
+```json
+{
+  "agent_id": "agent-1",
+  "lease_seconds": 900
+}
+```
+
+`POST /api/agent-tasks/{task_id}/result` request:
+
+```json
+{
+  "result_payload": { "ok": true },
+  "produced_asset_ids": ["880e8400-e29b-41d4-a716-446655440003"]
+}
+```
+
+MCP exposes matching Slice 2 tools: `list_pending_agent_tasks(project_id, capability_filter)`, `claim_agent_task(task_id, agent_id, lease_seconds)`, and `submit_agent_task_result(task_id, result_payload, produced_asset_ids)`.
+
 ## Status Codes
 
 | Code | Meaning |
@@ -166,6 +216,7 @@ The server reads these environment variables:
 | `ADAM_DATABASE__URL` | PostgreSQL connection URL | Required for `postgres` |
 | `ADAM_SERVER__HOST` | Bind host | `0.0.0.0` |
 | `ADAM_SERVER__PORT` | Bind port | `3000` |
+| `ADAM_AGENT_TASK_EXPIRY_INTERVAL_SECONDS` | AgentTask expiry scan interval; `0` disables the worker | `60` |
 
 Run modes:
 

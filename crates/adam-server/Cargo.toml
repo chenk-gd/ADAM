@@ -27,6 +27,7 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 rmcp = { workspace = true, features = ["server", "transport-io"] }
 uuid = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
